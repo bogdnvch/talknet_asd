@@ -8,20 +8,20 @@ setup(
     url="https://github.com/bogdnvch/talknet_asd",
     packages=find_packages(),
     install_requires=[
-        'torch>=1.6.0',
-        'torchaudio>=0.6.0',
+        'torch>=2.6.0,<2.7.0',  # Совместимо с ai-clips
+        'torchaudio>=2.6.0,<2.7.0',  # Совместимо с ai-clips
+        'torchvision>=0.21.0,<0.22.0',  # Точно соответствует ai-clips
         'numpy',
         'scipy',
         'scikit-learn',
         'tqdm',
-        'scenedetect',
-        'opencv-python',
-        'python_speech_features',
-        'torchvision',
-        'ffmpeg',
-        'gdown',
-        'youtube-dl',
-        'pandas'
+        'scenedetect>=0.6.6',
+        'opencv-python>=4.5.0',
+        'python_speech_features>=0.6',
+        'ffmpeg-python>=1.4',  # Используем ffmpeg-python вместо ffmpeg
+        'gdown>=5.0.0',
+        'youtube-dl>=2021.12.17',
+        'pandas>=2.0.0'
     ],
     python_requires='>=3.12',
 )
