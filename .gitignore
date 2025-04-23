@@ -8,8 +8,8 @@
 data/
 tests/
 exps/
-demo/*
-
+talknet_asd/demo/*
+.idea
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
