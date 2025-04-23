@@ -1,4 +1,3 @@
-import argparse
 import sys
 import glob
 import time
@@ -31,7 +30,7 @@ warnings.filterwarnings("ignore")
 
 def visualization(tracks, scores, args):
     # CPU: visulize the result for video format
-    flist = glob.glob(os.path.join(args.pyframesPath, '*.jpg'))
+    flist = glob.glob(os.path.join(args.pyframes_path, '*.jpg'))
     flist.sort()
     faces = [[] for i in range(len(flist))]
     for tidx, track in enumerate(tracks):
@@ -43,7 +42,7 @@ def visualization(tracks, scores, args):
     firstImage = cv2.imread(flist[0])
     fw = firstImage.shape[1]
     fh = firstImage.shape[0]
-    vOut = cv2.VideoWriter(os.path.join(args.pyaviPath, 'video_only.avi'), cv2.VideoWriter_fourcc(*'XVID'), 25, (fw,fh))
+    vOut = cv2.VideoWriter(os.path.join(args.pyavi_path, 'video_only.avi'), cv2.VideoWriter_fourcc(*'XVID'), 25, (fw,fh))
     colorDict = {0: 0, 1: 255}
     for fidx, fname in tqdm.tqdm(enumerate(flist), total = len(flist)):
         image = cv2.imread(fname)
@@ -55,74 +54,57 @@ def visualization(tracks, scores, args):
         vOut.write(image)
     vOut.release()
     command = ("ffmpeg -y -i %s -i %s -threads %d -c:v copy -c:a copy %s -loglevel panic" % \
-        (os.path.join(args.pyaviPath, 'video_only.avi'), os.path.join(args.pyaviPath, 'audio.wav'), \
-        args.nDataLoaderThread, os.path.join(args.pyaviPath,'video_out.avi')))
+        (os.path.join(args.pyavi_path, 'video_only.avi'), os.path.join(args.pyavi_path, 'audio.wav'), \
+        args.n_data_loader_thread, os.path.join(args.pyavi_path,'video_out.avi')))
     subprocess.call(command, shell=True, stdout=None)
 
 
 def download_model_if_needed(model_path):
+    print("dgsdgs")
     if not os.path.isfile(model_path):
+        print("1111")
         Link = "1AbN9fCf9IexMxEKXLQY2KYBlb-IhSEea"
-        cmd = "gdown --id %s -O %s"%(Link, "pretrain_TalkSet.model")
+        cmd = "gdown --id %s -O %s"%(Link, model_path)
         subprocess.call(cmd, shell=True, stdout=None)
 
 
 class VideoPreprocessor:
     def __init__(self, args):
         self.args = args
-        self._setup_paths()
-
-    def _setup_paths(self):
-        """Initialize required directories"""
-        # self.args.videoPath = glob.glob(os.path.join(self.args.videoFolder, self.args.videoName + '.*'))[0]
-        # self.args.savePath = os.path.join(self.args.videoFolder, self.args.videoName)
-
-        self.args.pyaviPath = os.path.join(self.args.savePath, 'pyavi')
-        self.args.pyframesPath = os.path.join(self.args.savePath, 'pyframes')
-        self.args.pyworkPath = os.path.join(self.args.savePath, 'pywork')
-        self.args.pycropPath = os.path.join(self.args.savePath, 'pycrop')
-
-        if os.path.exists(self.args.savePath):
-            rmtree(self.args.savePath)
-
-        os.makedirs(self.args.pyaviPath, exist_ok=True)
-        os.makedirs(self.args.pyframesPath, exist_ok=True)
-        os.makedirs(self.args.pyworkPath, exist_ok=True)
-        os.makedirs(self.args.pycropPath, exist_ok=True)
 
     def extract_video(self):
         """Extract video to frames"""
-        self.args.videoFilePath = os.path.join(self.args.pyaviPath, 'video.avi')
+        self.args.video_file_path = os.path.join(self.args.pyavi_path, 'video.avi')
         command = (
             "ffmpeg -y -i %s -qscale:v 2 -threads %d -async 1 -r 25 %s -loglevel panic" %
-            (self.args.videoPath, self.args.nDataLoaderThread, self.args.videoFilePath)
+            (self.args.video_path, self.args.n_data_loader_thread, self.args.video_file_path)
         )
         subprocess.call(command, shell=True)
         sys.stderr.write(
-            time.strftime("%Y-%m-%d %H:%M:%S") + " Extract the video and save in %s \r\n" % self.args.videoFilePath
+            time.strftime("%Y-%m-%d %H:%M:%S") + " Extract the video and save in %s \r\n" % self.args.video_file_path
         )
 
     def extract_audio(self):
         """Extract audio track"""
-        self.args.audioFilePath = os.path.join(self.args.pyaviPath, 'audio.wav')
+        self.args.audio_file_path = os.path.join(self.args.pyavi_path, 'audio.wav')
         command = (
             "ffmpeg -y -i %s -qscale:a 0 -ac 1 -vn -threads %d -ar 16000 %s -loglevel panic" %
-            (self.args.videoFilePath, self.args.nDataLoaderThread, self.args.audioFilePath)
+            (self.args.video_file_path, self.args.n_data_loader_thread, self.args.audio_file_path)
         )
         subprocess.call(command, shell=True, stdout=None)
         sys.stderr.write(
-            time.strftime("%Y-%m-%d %H:%M:%S") + " Extract the audio and save in %s \r\n" % self.args.audioFilePath
+            time.strftime("%Y-%m-%d %H:%M:%S") + " Extract the audio and save in %s \r\n" % self.args.audio_file_path
         )
 
     def extract_frames(self):
         """Extract individual frames"""
         command = (
             "ffmpeg -y -i %s -qscale:v 2 -threads %d -f image2 %s -loglevel panic" %
-            (self.args.videoFilePath, self.args.nDataLoaderThread, os.path.join(self.args.pyframesPath, '%06d.jpg'))
+            (self.args.video_file_path, self.args.n_data_loader_thread, os.path.join(self.args.pyframes_path, '%06d.jpg'))
         )
         subprocess.call(command, shell=True, stdout=None)
         sys.stderr.write(
-            time.strftime("%Y-%m-%d %H:%M:%S") + " Extract the frames and save in %s \r\n" % self.args.pyframesPath
+            time.strftime("%Y-%m-%d %H:%M:%S") + " Extract the frames and save in %s \r\n" % self.args.pyframes_path
         )
 
 
@@ -133,7 +115,7 @@ class FaceProcessor:
 
     def scenes_detect(self):
         # CPU: Scene detection, output is the list of each shot's time duration
-        videoManager = VideoManager([self.args.videoFilePath])
+        videoManager = VideoManager([self.args.video_file_path])
         statsManager = StatsManager()
         sceneManager = SceneManager(statsManager)
         sceneManager.add_detector(ContentDetector())
@@ -142,25 +124,25 @@ class FaceProcessor:
         videoManager.start()
         sceneManager.detect_scenes(frame_source=videoManager)
         sceneList = sceneManager.get_scene_list(baseTimecode)
-        savePath = os.path.join(self.args.pyworkPath, 'scene.pckl')
+        savePath = os.path.join(self.args.pywork_path, 'scene.pckl')
         if sceneList == []:
             sceneList = [(videoManager.get_base_timecode(), videoManager.get_current_timecode())]
         with open(savePath, 'wb') as fil:
             pickle.dump(sceneList, fil)
-            sys.stderr.write('%s - scenes detected %d\n' % (self.args.videoFilePath, len(sceneList)))
-        sys.stderr.write(time.strftime("%Y-%m-%d %H:%M:%S") + " Scene detection and save in %s \r\n" % self.args.pyworkPath)
+            sys.stderr.write('%s - scenes detected %d\n' % (self.args.video_file_path, len(sceneList)))
+        sys.stderr.write(time.strftime("%Y-%m-%d %H:%M:%S") + " Scene detection and save in %s \r\n" % self.args.pywork_path)
         return sceneList
 
     def detect_faces(self):
         """Run face detection on all frames"""
-        flist = glob.glob(os.path.join(self.args.pyframesPath, '*.jpg'))
+        flist = glob.glob(os.path.join(self.args.pyframes_path, '*.jpg'))
         flist.sort()
         detections = []
 
         for fidx, fname in enumerate(flist):
             image = cv2.imread(fname)
             image_np = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            bboxes = self.detector.detect_faces(image_np, conf_th=0.9, scales=[self.args.facedetScale])
+            bboxes = self.detector.detect_faces(image_np, conf_th=0.9, scales=[self.args.facedet_scale])
 
             frame_detections = []
             for bbox in bboxes:
@@ -171,17 +153,17 @@ class FaceProcessor:
                 })
             detections.append(frame_detections)
 
-        with open(os.path.join(self.args.pyworkPath, 'faces.pckl'), 'wb') as f:
+        with open(os.path.join(self.args.pywork_path, 'faces.pckl'), 'wb') as f:
             pickle.dump(detections, f)
 
-        sys.stderr.write(time.strftime("%Y-%m-%d %H:%M:%S") + " Face detection and save in %s \r\n" % (self.args.pyworkPath))
+        sys.stderr.write(time.strftime("%Y-%m-%d %H:%M:%S") + " Face detection and save in %s \r\n" % (self.args.pywork_path))
         return detections
 
     def track_faces(self, scenes, face_detections):
         all_tracks = []
         for shot in scenes:
             if shot[1].frame_num - shot[
-                0].frame_num >= self.args.minTrack:  # Discard the shot frames less than minTrack frames
+                0].frame_num >= self.args.min_track:  # Discard the shot frames less than min_track frames
                 all_tracks.extend(self.track_shot(face_detections[shot[0].frame_num:shot[
                     1].frame_num]))  # 'frames' to present this tracks' timestep, 'bbox' presents the location of the faces
         sys.stderr.write(
@@ -199,7 +181,7 @@ class FaceProcessor:
                     if track == []:
                         track.append(face)
                         frameFaces.remove(face)
-                    elif face['frame'] - track[-1]['frame'] <= self.args.numFailedDet:
+                    elif face['frame'] - track[-1]['frame'] <= self.args.num_failed_det:
                         iou = self.bb_intersection_over_union(face['bbox'], track[-1]['bbox'])
                         if iou > iouThres:
                             track.append(face)
@@ -209,7 +191,7 @@ class FaceProcessor:
                         break
             if track == []:
                 break
-            elif len(track) > self.args.minTrack:
+            elif len(track) > self.args.min_track:
                 frameNum = numpy.array([f['frame'] for f in track])
                 bboxes = numpy.array([numpy.array(f['bbox']) for f in track])
                 frameI = numpy.arange(frameNum[0], frameNum[-1] + 1)
@@ -219,7 +201,7 @@ class FaceProcessor:
                     bboxesI.append(interpfn(frameI))
                 bboxesI = numpy.stack(bboxesI, axis=1)
                 if max(numpy.mean(bboxesI[:, 2] - bboxesI[:, 0]),
-                       numpy.mean(bboxesI[:, 3] - bboxesI[:, 1])) > self.args.minFaceSize:
+                       numpy.mean(bboxesI[:, 3] - bboxesI[:, 1])) > self.args.min_face_size:
                     tracks.append({'frame': frameI, 'bbox': bboxesI})
         return tracks
 
@@ -242,7 +224,7 @@ class FaceProcessor:
     def video_tracks(self, all_tracks):
         video_tracks = []
         for ii, track in enumerate(all_tracks):
-            video_tracks.append(self.crop_video(track, os.path.join(self.args.pycropPath, f'{ii:05d}')))
+            video_tracks.append(self.crop_video(track, os.path.join(self.args.pycrop_path, f'{ii:05d}')))
 
         print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} Face Crop")
 
@@ -251,9 +233,9 @@ class FaceProcessor:
     def crop_video(self, track, cropFile):
         # CPU: crop the face clips
 
-        self.args.audioFilePath = os.path.join(self.args.pyaviPath, 'audio.wav')
+        self.args.audio_file_path = os.path.join(self.args.pyavi_path, 'audio.wav')
 
-        flist = glob.glob(os.path.join(self.args.pyframesPath, '*.jpg'))  # Read the frames
+        flist = glob.glob(os.path.join(self.args.pyframes_path, '*.jpg'))  # Read the frames
         flist.sort()
         vOut = cv2.VideoWriter(cropFile + 't.avi', cv2.VideoWriter_fourcc(*'XVID'), 25, (224, 224))  # Write video
         dets = {'x': [], 'y': [], 's': []}
@@ -265,7 +247,7 @@ class FaceProcessor:
         dets['x'] = signal.medfilt(dets['x'], kernel_size=13)
         dets['y'] = signal.medfilt(dets['y'], kernel_size=13)
         for fidx, frame in enumerate(track['frame']):
-            cs = self.args.cropScale
+            cs = self.args.crop_scale
             bs = dets['s'][fidx]  # Detection box size
             bsi = int(bs * (1 + 2 * cs))  # Pad videos by this amount
             image = cv2.imread(flist[frame])
@@ -280,17 +262,17 @@ class FaceProcessor:
         vOut.release()
         command = (
                     "ffmpeg -y -i %s -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 -threads %d -ss %.3f -to %.3f %s -loglevel panic" % \
-                    (self.args.audioFilePath, self.args.nDataLoaderThread, audioStart, audioEnd, audioTmp))
+                    (self.args.audio_file_path, self.args.n_data_loader_thread, audioStart, audioEnd, audioTmp))
         subprocess.call(command, shell=True, stdout=None)  # Crop audio file
         _, audio = wavfile.read(audioTmp)
         command = ("ffmpeg -y -i %st.avi -i %s -threads %d -c:v copy -c:a copy %s.avi -loglevel panic" %
-                   (cropFile, audioTmp, self.args.nDataLoaderThread, cropFile))  # Combine audio and video file
+                   (cropFile, audioTmp, self.args.n_data_loader_thread, cropFile))  # Combine audio and video file
         subprocess.call(command, shell=True, stdout=None)
         os.remove(cropFile + 't.avi')
         return {'track': track, 'proc_track': dets}
 
     def save_results(self, video_tracks):
-        save_path = os.path.join(self.args.pyworkPath, 'tracks.pckl')
+        save_path = os.path.join(self.args.pywork_path, 'tracks.pckl')
         with open(save_path, 'wb') as f:
             pickle.dump(video_tracks, f)
 
@@ -299,24 +281,24 @@ class ActiveSpeakerDetector:
     def __init__(self, args):
         self.args = args
         self.model = talkNet()
-        self.model.loadParameters(args.pretrainModel)
+        self.model.loadParameters(args.pretrain_model)
         self.model.eval()
 
     def evaluate_network(self):
         # GPU: active speaker detection by pretrained TalkNet
-        files = glob.glob("%s/*.avi" % self.args.pycropPath)
+        files = glob.glob("%s/*.avi" % self.args.pycrop_path)
         files.sort()
-        self.model.loadParameters(self.args.pretrainModel)
-        sys.stderr.write("Model %s loaded from previous state! \r\n" % self.args.pretrainModel)
+        self.model.loadParameters(self.args.pretrain_model)
+        sys.stderr.write("Model %s loaded from previous state! \r\n" % self.args.pretrain_model)
         self.model.eval()
         all_scores = []
         # duration_set = {1,2,4,6} # To make the result more reliable
         duration_set = {1, 1, 1, 2, 2, 2, 3, 3, 4, 5, 6}  # Use this line can get more reliable result
         for file in tqdm.tqdm(files, total=len(files)):
             file_name = os.path.splitext(file.split('/')[-1])[0]  # Load audio and video
-            _, audio = wavfile.read(os.path.join(self.args.pycropPath, file_name + '.wav'))
+            _, audio = wavfile.read(os.path.join(self.args.pycrop_path, file_name + '.wav'))
             audio_feature = python_speech_features.mfcc(audio, 16000, numcep=13, winlen=0.025, winstep=0.010)
-            video = cv2.VideoCapture(os.path.join(self.args.pycropPath, file_name + '.avi'))
+            video = cv2.VideoCapture(os.path.join(self.args.pycrop_path, file_name + '.avi'))
             video_feature = []
             while video.isOpened():
                 ret, frames = video.read()
@@ -356,40 +338,68 @@ class ActiveSpeakerDetector:
         return all_scores
 
     def save_results(self, scores):
-        save_path = os.path.join(self.args.pyworkPath, 'scores.pckl')
+        save_path = os.path.join(self.args.pywork_path, 'scores.pckl')
         with open(save_path, 'wb') as fil:
             pickle.dump(scores, fil)
 
 
-def parse_arguments():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description="TalkNet ASD Pipeline")
-
-    # Input/output parameters
-    parser.add_argument('--videoPath', required=True, help='Input video path')
-    parser.add_argument('--savePath', default="output", help='Output directory')
-    parser.add_argument('--pretrainModel', default="talknet_asd/pretrain_TalkSet.model", help='Model path')
-
-    # Processing parameters
-    parser.add_argument('--nDataLoaderThread', type=int, default=10)
-    parser.add_argument('--facedetScale', type=float, default=0.25)
-    parser.add_argument('--minTrack', type=int, default=10)
-    parser.add_argument('--numFailedDet', type=int, default=10)
-    parser.add_argument('--minFaceSize', type=int, default=1)
-    parser.add_argument('--cropScale', type=float, default=0.40)
-    parser.add_argument('--withVisualization', type=bool, default=False)
-    parser.add_argument('--saveAllResultFiles', type=bool, default=False)
-
-    return parser.parse_args()
-
-
 class Pipeline:
-    def __init__(self, args):
-        self.args = args
-        self.video_preprocessor = VideoPreprocessor(args)
-        self.face_processor = FaceProcessor(args)
-        self.speaker_detector = ActiveSpeakerDetector(args)
-        download_model_if_needed("talknet_asd/pretrain_TalkSet.model")
+    def __init__(
+        self,
+        video_path: str,
+        save_path: str,
+        pretrain_model: str = "talknet_asd/pretrain_TalkSet.model",
+        n_data_loader_thread: int = 10,
+        facedet_scale: float = 0.25,
+        min_track: int = 10,
+        num_failed_det: int = 10,
+        min_face_size: int = 1,
+        crop_scale: float = 0.40,
+        with_visualization: bool = False,
+        save_all_result_files: bool = False,
+        **kwargs
+    ):
+        self.video_path = video_path
+        self.save_path = save_path
+        self.pretrain_model = pretrain_model
+
+        self.n_data_loader_thread = n_data_loader_thread
+        self.facedet_scale = facedet_scale
+        self.min_track = min_track
+        self.num_failed_det = num_failed_det
+        self.min_face_size = min_face_size
+        self.crop_scale = crop_scale
+
+        self.with_visualization = with_visualization
+        self.save_all_result_files = save_all_result_files
+
+        self.pyavi_path = None
+        self.pyframes_path = None
+        self.pywork_path = None
+        self.pycrop_path = None
+
+        self._setup_paths()
+
+        download_model_if_needed(self.pretrain_model)
+
+        self.video_preprocessor = VideoPreprocessor(self)
+        self.face_processor = FaceProcessor(self)
+        self.speaker_detector = ActiveSpeakerDetector(self)
+
+
+    def _setup_paths(self):
+        self.pyavi_path = os.path.join(self.save_path, 'pyavi')
+        self.pyframes_path = os.path.join(self.save_path, 'pyframes')
+        self.pywork_path = os.path.join(self.save_path, 'pywork')
+        self.pycrop_path = os.path.join(self.save_path, 'pycrop')
+
+        if os.path.exists(self.save_path):
+            rmtree(self.save_path)
+
+        os.makedirs(self.pyavi_path, exist_ok=True)
+        os.makedirs(self.pyframes_path, exist_ok=True)
+        os.makedirs(self.pywork_path, exist_ok=True)
+        os.makedirs(self.pycrop_path, exist_ok=True)
 
     def run(self):
         """Run complete pipeline"""
@@ -409,36 +419,34 @@ class Pipeline:
         scores = self.speaker_detector.evaluate_network()
         self.speaker_detector.save_results(scores=scores)
 
-        if self.args.withVisualization:
-            visualization(scores=scores, tracks=video_tracks, args=self.args)
+        if self.with_visualization:
+            visualization(scores=scores, tracks=video_tracks, args=self)
 
         # 4. Cleanup
-        if not self.args.saveAllResultFiles:
+        if not self.save_all_result_files:
             self._cleanup()
-
 
     def _cleanup(self):
         """Remove temporary files"""
         to_delete_paths = (
-            [self.args.pyframesPath, self.args.pycropPath] if self.args.withVisualization
-            else [self.args.pyframesPath, self.args.pycropPath, self.args.pyaviPath]
+            [self.pyframes_path, self.pycrop_path] if self.with_visualization
+            else [self.pyframes_path, self.pycrop_path, self.pyavi_path]
         )
 
         for path in to_delete_paths:
             if os.path.exists(path):
                 rmtree(path)
 
-        faces_file = os.path.join(self.args.pyworkPath, 'faces.pckl')
-        scenes_file = os.path.join(self.args.pyworkPath, 'scene.pckl')
+        faces_file = os.path.join(self.pywork_path, 'faces.pckl')
+        scenes_file = os.path.join(self.pywork_path, 'scene.pckl')
         os.remove(faces_file)
         os.remove(scenes_file)
 
 
-def main():
-    args = parse_arguments()
-    pipeline = Pipeline(args)
-    pipeline.run()
-
-
-if __name__ == '__main__':
-    main()
+# def main():
+#     pipeline = Pipeline(video_path="input.mp4", save_path="output")
+#     pipeline.run()
+#
+#
+# if __name__ == '__main__':
+#     main()
