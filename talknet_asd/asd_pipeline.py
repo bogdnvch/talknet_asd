@@ -7,6 +7,7 @@ import subprocess
 import warnings
 import pickle
 import math
+from pathlib import Path
 
 import torch
 import numpy
@@ -26,6 +27,9 @@ from talknet_asd.model.faceDetector.s3fd import S3FD
 from talknet_asd.talkNet import talkNet
 
 warnings.filterwarnings("ignore")
+
+cache_dir = Path.home() / ".cache" / "talknet_asd"
+cache_dir.mkdir(parents=True, exist_ok=True)
 
 
 def visualization(tracks, scores, args):
@@ -60,9 +64,7 @@ def visualization(tracks, scores, args):
 
 
 def download_model_if_needed(model_path):
-    print("dgsdgs")
     if not os.path.isfile(model_path):
-        print("1111")
         Link = "1AbN9fCf9IexMxEKXLQY2KYBlb-IhSEea"
         cmd = "gdown --id %s -O %s"%(Link, model_path)
         subprocess.call(cmd, shell=True, stdout=None)
@@ -348,7 +350,6 @@ class Pipeline:
         self,
         video_path: str,
         save_path: str,
-        pretrain_model: str = "talknet_asd/pretrain_TalkSet.model",
         n_data_loader_thread: int = 10,
         facedet_scale: float = 0.25,
         min_track: int = 10,
@@ -361,7 +362,7 @@ class Pipeline:
     ):
         self.video_path = video_path
         self.save_path = save_path
-        self.pretrain_model = pretrain_model
+        self.pretrain_model = cache_dir / "pretrain_TalkSet.model"
 
         self.n_data_loader_thread = n_data_loader_thread
         self.facedet_scale = facedet_scale

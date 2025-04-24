@@ -2,11 +2,14 @@ import time, os, sys, subprocess
 import numpy as np
 import cv2
 import torch
-from torchvision import transforms
 from .nets import S3FDNet
 from .box_utils import nms_
+from pathlib import Path
 
-PATH_WEIGHT = 'talknet_asd/model/faceDetector/s3fd/sfd_face.pth'
+cache_dir = Path.home() / ".cache" / "talknet_asd"
+cache_dir.mkdir(parents=True, exist_ok=True)
+
+PATH_WEIGHT = cache_dir / "sfd_face.pth"
 if os.path.isfile(PATH_WEIGHT) == False:
     Link = "1KafnHz7ccT-3IyddBsL5yi2xGtxAKypt"
     cmd = "gdown --id %s -O %s"%(Link, PATH_WEIGHT)
