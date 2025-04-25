@@ -8,6 +8,7 @@ import warnings
 import pickle
 import math
 from pathlib import Path
+from typing import Literal
 
 import torch
 import numpy
@@ -25,6 +26,7 @@ from scenedetect.detectors import ContentDetector
 
 from talknet_asd.model.faceDetector.s3fd import S3FD
 from talknet_asd.talkNet import talkNet
+from talknet_asd.utils.resolve_device import resolve_device
 
 warnings.filterwarnings("ignore")
 
@@ -33,7 +35,6 @@ cache_dir.mkdir(parents=True, exist_ok=True)
 
 
 def visualization(tracks, scores, args):
-    # CPU: visulize the result for video format
     flist = glob.glob(os.path.join(args.pyframes_path, '*.jpg'))
     flist.sort()
     faces = [[] for i in range(len(flist))]
@@ -113,10 +114,9 @@ class VideoPreprocessor:
 class FaceProcessor:
     def __init__(self, args):
         self.args = args
-        self.detector = S3FD(device='cpu')
+        self.detector = S3FD(device=args.device)
 
     def scenes_detect(self):
-        # CPU: Scene detection, output is the list of each shot's time duration
         videoManager = VideoManager([self.args.video_file_path])
         statsManager = StatsManager()
         sceneManager = SceneManager(statsManager)
@@ -173,7 +173,6 @@ class FaceProcessor:
         return all_tracks
 
     def track_shot(self, sceneFaces):
-        # CPU: Face tracking
         iouThres = 0.5  # Minimum IOU between consecutive face detections
         tracks = []
         while True:
@@ -209,7 +208,6 @@ class FaceProcessor:
 
     @staticmethod
     def bb_intersection_over_union(boxA, boxB, evalCol=False):
-        # CPU: IOU Function to calculate overlap between two image
         xA = max(boxA[0], boxB[0])
         yA = max(boxA[1], boxB[1])
         xB = min(boxA[2], boxB[2])
@@ -233,7 +231,6 @@ class FaceProcessor:
         return video_tracks
 
     def crop_video(self, track, cropFile):
-        # CPU: crop the face clips
 
         self.args.audio_file_path = os.path.join(self.args.pyavi_path, 'audio.wav')
 
@@ -324,9 +321,9 @@ class ActiveSpeakerDetector:
                 with torch.no_grad():
                     for i in range(batch_size):
                         input_a = torch.FloatTensor(
-                            audio_feature[i * duration * 100:(i + 1) * duration * 100, :]).unsqueeze(0).cpu()
+                            audio_feature[i * duration * 100:(i + 1) * duration * 100, :]).unsqueeze(0).to(self.args.device)
                         input_v = torch.FloatTensor(
-                            video_feature[i * duration * 25: (i + 1) * duration * 25, :, :]).unsqueeze(0).cpu()
+                            video_feature[i * duration * 25: (i + 1) * duration * 25, :, :]).unsqueeze(0).to(self.args.device)
                         embed_a = self.model.model.forward_audio_frontend(input_a)
                         embed_v = self.model.model.forward_visual_frontend(input_v)
                         embed_a, embed_v = self.model.model.forward_cross_attention(embed_a, embed_v)
@@ -356,10 +353,11 @@ class Pipeline:
         num_failed_det: int = 10,
         min_face_size: int = 1,
         crop_scale: float = 0.40,
-        with_visualization: bool = False,
-        save_all_result_files: bool = False,
+        device: Literal["auto", "cpu", "cuda", "mps"] = "auto",
         **kwargs
     ):
+        self.device = resolve_device(device=device)
+
         self.video_path = video_path
         self.save_path = save_path
         self.pretrain_model = cache_dir / "pretrain_TalkSet.model"
@@ -383,9 +381,9 @@ class Pipeline:
 
         download_model_if_needed(self.pretrain_model)
 
-        self.video_preprocessor = VideoPreprocessor(self)
-        self.face_processor = FaceProcessor(self)
-        self.speaker_detector = ActiveSpeakerDetector(self)
+        self.video_preprocessor = VideoPreprocessor(args=self)
+        self.face_processor = FaceProcessor(args=self)
+        self.speaker_detector = ActiveSpeakerDetector(args=self)
 
 
     def _setup_paths(self):
