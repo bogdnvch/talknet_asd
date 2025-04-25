@@ -1,3 +1,4 @@
+import shutil
 import sys
 import glob
 import time
@@ -9,13 +10,13 @@ import pickle
 import math
 from pathlib import Path
 from typing import Literal
+from datetime import datetime
 
 import torch
 import numpy
 import python_speech_features
 import cv2
 from scipy import signal
-from shutil import rmtree
 from scipy.io import wavfile
 from scipy.interpolate import interp1d
 
@@ -346,7 +347,6 @@ class Pipeline:
     def __init__(
         self,
         video_path: str,
-        save_path: str,
         n_data_loader_thread: int = 10,
         facedet_scale: float = 0.25,
         min_track: int = 10,
@@ -359,7 +359,10 @@ class Pipeline:
         self.device = resolve_device(device=device)
 
         self.video_path = video_path
-        self.save_path = save_path
+
+        video_name = self._get_filename(file_path=video_path)
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        self.save_path = cache_dir / f"{video_name}-{now_iso}"
         self.pretrain_model = cache_dir / "pretrain_TalkSet.model"
 
         self.n_data_loader_thread = n_data_loader_thread
@@ -369,9 +372,6 @@ class Pipeline:
         self.min_face_size = min_face_size
         self.crop_scale = crop_scale
 
-        self.with_visualization = with_visualization
-        self.save_all_result_files = save_all_result_files
-
         self.pyavi_path = None
         self.pyframes_path = None
         self.pywork_path = None
@@ -379,73 +379,63 @@ class Pipeline:
 
         self._setup_paths()
 
-        download_model_if_needed(self.pretrain_model)
+        try:
+            download_model_if_needed(self.pretrain_model)
 
-        self.video_preprocessor = VideoPreprocessor(args=self)
-        self.face_processor = FaceProcessor(args=self)
-        self.speaker_detector = ActiveSpeakerDetector(args=self)
+            self.video_preprocessor = VideoPreprocessor(args=self)
+            self.face_processor = FaceProcessor(args=self)
+            self.speaker_detector = ActiveSpeakerDetector(args=self)
+        except Exception:
+            print("Error while trying to initialize ASD pipeline")
+            self._cleanup_cache()
+            raise
 
 
     def _setup_paths(self):
-        self.pyavi_path = os.path.join(self.save_path, 'pyavi')
-        self.pyframes_path = os.path.join(self.save_path, 'pyframes')
-        self.pywork_path = os.path.join(self.save_path, 'pywork')
-        self.pycrop_path = os.path.join(self.save_path, 'pycrop')
+        self.pyavi_path = self.save_path / "pyavi"
+        self.pyframes_path = self.save_path / "pyframes"
+        self.pywork_path = self.save_path / "pywork"
+        self.pycrop_path = self.save_path / "pycrop"
 
-        if os.path.exists(self.save_path):
-            rmtree(self.save_path)
+        self._cleanup_cache()
 
-        os.makedirs(self.pyavi_path, exist_ok=True)
-        os.makedirs(self.pyframes_path, exist_ok=True)
-        os.makedirs(self.pywork_path, exist_ok=True)
-        os.makedirs(self.pycrop_path, exist_ok=True)
+        self.pyavi_path.mkdir(parents=True, exist_ok=True)
+        self.pyframes_path.mkdir(parents=True, exist_ok=True)
+        self.pywork_path.mkdir(parents=True, exist_ok=True)
+        self.pycrop_path.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _get_filename(file_path: str):
+        base_name = os.path.basename(file_path)
+        filename, _ = os.path.splitext(base_name)
+        return filename
 
     def run(self):
         """Run complete pipeline"""
-        # 1. Extract and prepare media
-        self.video_preprocessor.extract_video()
-        self.video_preprocessor.extract_audio()
-        self.video_preprocessor.extract_frames()
+        try:
+            # 1. Extract and prepare media
+            self.video_preprocessor.extract_video()
+            self.video_preprocessor.extract_audio()
+            self.video_preprocessor.extract_frames()
 
-        # 2. Face processing
-        scenes = self.face_processor.scenes_detect()
-        faces = self.face_processor.detect_faces()
-        all_tracks = self.face_processor.track_faces(scenes=scenes, face_detections=faces)
-        video_tracks = self.face_processor.video_tracks(all_tracks=all_tracks)
-        self.face_processor.save_results(video_tracks=video_tracks)
+            # 2. Face processing
+            scenes = self.face_processor.scenes_detect()
+            faces = self.face_processor.detect_faces()
+            all_tracks = self.face_processor.track_faces(scenes=scenes, face_detections=faces)
+            video_tracks = self.face_processor.video_tracks(all_tracks=all_tracks)
+            self.face_processor.save_results(video_tracks=video_tracks)
 
-        # 3. Active speaker detection
-        scores = self.speaker_detector.evaluate_network()
-        self.speaker_detector.save_results(scores=scores)
+            # 3. Active speaker detection
+            scores = self.speaker_detector.evaluate_network()
+            self.speaker_detector.save_results(scores=scores)
 
-        if self.with_visualization:
             visualization(scores=scores, tracks=video_tracks, args=self)
+        except Exception:
+            print(f"Error while trying to process video {self.video_path}")
+            self._cleanup_cache()
+            raise
 
-        # 4. Cleanup
-        if not self.save_all_result_files:
-            self._cleanup()
-
-    def _cleanup(self):
-        """Remove temporary files"""
-        to_delete_paths = (
-            [self.pyframes_path, self.pycrop_path] if self.with_visualization
-            else [self.pyframes_path, self.pycrop_path, self.pyavi_path]
-        )
-
-        for path in to_delete_paths:
-            if os.path.exists(path):
-                rmtree(path)
-
-        faces_file = os.path.join(self.pywork_path, 'faces.pckl')
-        scenes_file = os.path.join(self.pywork_path, 'scene.pckl')
-        os.remove(faces_file)
-        os.remove(scenes_file)
-
-
-# def main():
-#     pipeline = Pipeline(video_path="input.mp4", save_path="output")
-#     pipeline.run()
-#
-#
-# if __name__ == '__main__':
-#     main()
+    def _cleanup_cache(self):
+        print(f"Deleting {self.save_path}")
+        if self.save_path.exists():
+            shutil.rmtree(self.save_path)
