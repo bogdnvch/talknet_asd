@@ -436,6 +436,6 @@ class Pipeline:
             raise
 
     def _cleanup_cache(self):
-        print(f"Deleting {self.save_path}")
         if self.save_path.exists():
+            print(f"Deleting {self.save_path}")
             shutil.rmtree(self.save_path)
