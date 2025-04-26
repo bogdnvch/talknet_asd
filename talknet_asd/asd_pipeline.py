@@ -168,6 +168,8 @@ class FaceProcessor:
             task="detect",
             verbose=False,
         )
+        if self.args.device == "cpu":
+            self.detector.export(format="onnx", dynamic=True, device="cpu")
 
     def scenes_detect(self):
         videoManager = VideoManager([self.args.video_file_path])
