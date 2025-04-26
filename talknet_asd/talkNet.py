@@ -5,13 +5,12 @@ import sys, time, subprocess, pandas, tqdm
 
 from talknet_asd.loss import lossAV, lossA, lossV
 from talknet_asd.model.talkNetModel import talkNetModel
-from talknet_asd.utils.resolve_device import resolve_device
 
 
 class talkNet(nn.Module):
     def __init__(self, lr = 0.0001, lrDecay = 0.95, device = "auto", **kwargs):
         super(talkNet, self).__init__()
-        self.device = resolve_device(device=device)
+        self.device = device
         self.model = talkNetModel().to(self.device)
         self.lossAV = lossAV().to(self.device)
         self.lossA = lossA().to(self.device)

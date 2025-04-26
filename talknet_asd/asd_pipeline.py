@@ -280,7 +280,7 @@ class FaceProcessor:
 class ActiveSpeakerDetector:
     def __init__(self, args):
         self.args = args
-        self.model = talkNet()
+        self.model = talkNet(device=args.device)
         self.model.loadParameters(args.pretrain_model)
         self.model.eval()
 
