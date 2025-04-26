@@ -439,3 +439,6 @@ class Pipeline:
         if self.save_path.exists():
             print(f"Deleting {self.save_path}")
             shutil.rmtree(self.save_path)
+
+
+Pipeline(video_path="./input.mp4").run()
