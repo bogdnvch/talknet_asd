@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="talknet_asd",
-    version="0.1.3",
+    version="0.1.4",
     description="Active Speaker Detection using TalkNet",
     author="Maksim Bogdanovich",
     url="https://github.com/bogdnvch/talknet_asd",
@@ -15,7 +15,7 @@ setup(
         "pandas>=2.2.3,<3.0.0",
         "gdown>=5.2.0,<6.0.0",
         "tqdm>=4.67.1,<5.0.0",
-        "numpy>=2.2.5,<3.0.0",
+        "numpy>=2.2.5",
         "ffmpeg>=1.4,<2.0",
         "torch>=2.6.0,<3.0.0",
         "torchaudio>=2.6.0,<3.0.0",
