@@ -168,7 +168,6 @@ class FaceProcessor:
             task="detect",
             verbose=False,
         )
-        self.detector.to(self.args.device)
 
     def scenes_detect(self):
         videoManager = VideoManager([self.args.video_file_path])
@@ -208,7 +207,7 @@ class FaceProcessor:
         for fidx, fname in enumerate(pbar):
             image = cv2.imread(fname)
             image_np = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            results = self.detector(image_np, verbose=False)
+            results = self.detector(image_np, verbose=False, device=self.args.device)
 
             frame_detections = []
             for result in results:
