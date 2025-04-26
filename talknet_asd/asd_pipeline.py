@@ -168,7 +168,7 @@ class FaceProcessor:
             task="detect",
             verbose=False,
         )
-        if self.args.device == "cpu":
+        if self.args.device == torch.device("cpu"):
             onnx_path = self.detector.export(format="onnx", dynamic=True, device="cpu")
             print(f"ONNX path: {onnx_path}")
             self.detector = YOLO(onnx_path, task="detect", verbose=False)
@@ -211,7 +211,11 @@ class FaceProcessor:
         for fidx, fname in enumerate(pbar):
             image = cv2.imread(fname)
             image_np = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            results = self.detector(image_np, verbose=False, device=self.args.device)
+            results = self.detector(
+                image_np,
+                verbose=False,
+                device=str(self.args.device),
+            )
 
             frame_detections = []
             for result in results:
