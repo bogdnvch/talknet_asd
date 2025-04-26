@@ -169,7 +169,9 @@ class FaceProcessor:
             verbose=False,
         )
         if self.args.device == "cpu":
-            self.detector.export(format="onnx", dynamic=True, device="cpu")
+            onnx_path = self.detector.export(format="onnx", dynamic=True, device="cpu")
+            print(f"ONNX path: {onnx_path}")
+            self.detector = YOLO(onnx_path, task="detect", verbose=False)
 
     def scenes_detect(self):
         videoManager = VideoManager([self.args.video_file_path])
