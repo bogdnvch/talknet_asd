@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="talknet_asd",
-    version="0.1.9",
+    version="0.2.0",
     description="Active Speaker Detection using TalkNet",
     author="Maksim Bogdanovich",
     url="https://github.com/bogdnvch/talknet_asd",
