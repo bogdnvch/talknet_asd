@@ -20,6 +20,8 @@ setup(
         "torch>=2.6.0,<3.0.0",
         "torchaudio>=2.6.0,<3.0.0",
         "torchvision>=0.21.0,<0.22.0",
+        "ultralytics>=8.3.117,<8.4.0",
+        "huggingface-hub>=0.30.2",
     ],
     python_requires='>=3.12',
 )
