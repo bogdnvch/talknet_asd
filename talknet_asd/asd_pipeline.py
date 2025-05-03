@@ -246,7 +246,7 @@ class FaceProcessor:
             ):  # Discard the shot frames less than min_track frames
                 all_tracks.extend(
                     self.track_shot(
-                        face_detections[shot[0].frame_num : shot[1].frame_num]
+                        face_detections[shot[0].frame_num : shot[1].frame_num + 1]
                     )
                 )  # 'frames' to present this tracks' timestep, 'bbox' presents the location of the faces
         sys.stderr.write(
@@ -429,7 +429,7 @@ class ActiveSpeakerDetector:
             video.release()
             video_feature = numpy.array(video_feature)
             length = min(
-                (audio_feature.shape[0] - audio_feature.shape[0] % 4) / 100,
+                audio_feature.shape[0] / 100,
                 video_feature.shape[0] / 25,
             )
             audio_feature = audio_feature[: int(round(length * 100)), :]
