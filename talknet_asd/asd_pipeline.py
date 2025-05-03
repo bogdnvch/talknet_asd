@@ -163,7 +163,7 @@ class FaceProcessor:
         self.detector = YOLO(
             hf_hub_download(
                 repo_id="AlekseyKorshuk/yolov11-face",
-                filename="yolov11n-face.pt",
+                filename="yolov11l-face.pt",
             ),
             task="detect",
             verbose=False,
