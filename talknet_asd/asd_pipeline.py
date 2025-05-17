@@ -290,11 +290,19 @@ class FaceProcessor:
                 frameNum = numpy.array([f["frame"] for f in track])
                 bboxes = numpy.array([numpy.array(f["bbox"]) for f in track])
                 frameI = numpy.arange(frameNum[0], frameNum[-1] + 1)
+                confidences = numpy.array([f["conf"] for f in track])
                 bboxesI = []
                 for ij in range(0, 4):
                     interpfn = interp1d(frameNum, bboxes[:, ij])
                     bboxesI.append(interpfn(frameI))
                 bboxesI = numpy.stack(bboxesI, axis=1)
+
+                confInterpFn = interp1d(
+                    frameNum,
+                    confidences,
+                )
+                confidencesI = confInterpFn(frameI)
+
                 if (
                     max(
                         numpy.mean(bboxesI[:, 2] - bboxesI[:, 0]),
@@ -302,7 +310,11 @@ class FaceProcessor:
                     )
                     > self.args.min_face_size
                 ):
-                    tracks.append({"frame": frameI, "bbox": bboxesI})
+                    tracks.append({
+                        "frame": frameI,
+                        "bbox": bboxesI,
+                        "confidence": confidencesI,
+                    })
         return tracks
 
     @staticmethod
