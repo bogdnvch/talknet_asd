@@ -26,7 +26,7 @@ from scenedetect.stats_manager import StatsManager
 from scenedetect.detectors import ContentDetector
 
 from huggingface_hub import hf_hub_download
-from ultralytics import YOLO
+from deepface import DeepFace
 
 from talknet_asd.talkNet import talkNet
 from talknet_asd.utils.resolve_device import resolve_device
@@ -160,18 +160,7 @@ class VideoPreprocessor:
 class FaceProcessor:
     def __init__(self, args):
         self.args = args
-        self.detector = YOLO(
-            hf_hub_download(
-                repo_id="AlekseyKorshuk/yolov11-face",
-                filename="yolov11l-face.pt",
-            ),
-            task="detect",
-            verbose=False,
-        )
-        if self.args.device == torch.device("cpu"):
-            onnx_path = self.detector.export(format="onnx", dynamic=True, device="cpu")
-            print(f"ONNX path: {onnx_path}")
-            self.detector = YOLO(onnx_path, task="detect", verbose=False)
+        self.detector_backend: str = args.detector_backend
 
     def scenes_detect(self):
         videoManager = VideoManager([self.args.video_file_path])
@@ -209,24 +198,44 @@ class FaceProcessor:
         pbar = tqdm.tqdm(flist, total=len(flist), desc="Detecting faces")
 
         for fidx, fname in enumerate(pbar):
-            image = cv2.imread(fname)
-            image_np = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            results = self.detector(
-                image_np,
-                verbose=False,
-                device=str(self.args.device),
-            )
-
             frame_detections = []
-            for result in results:
-                for box in result.boxes:
-                    frame_detections.append(
-                        {
+            try:
+                faces = DeepFace.extract_faces(
+                    img_path=fname,
+                    detector_backend=self.detector_backend,
+                    align=True,
+                    enforce_detection=False,
+                )
+
+                if isinstance(faces, list) and len(faces) > 0:
+                    for face in faces:
+                        facial_area = face.get("facial_area", {})
+                        if not all(key in facial_area for key in ["x", "y", "w", "h"]):
+                            continue
+
+                        x = facial_area["x"]
+                        y = facial_area["y"]
+                        w = facial_area["w"]
+                        h = facial_area["h"]
+
+                        if face.get("confidence", 0) < 0.5:
+                            continue
+
+                        if w <= 0 or h <= 0:
+                            continue
+
+                        bbox = [x, y, x + w, y + h]
+
+                        frame_detections.append({
                             "frame": fidx,
-                            "bbox": box.xyxy.tolist()[0],
-                            "conf": float(box.conf.tolist()[0]),
-                        }
-                    )
+                            "bbox": bbox,
+                            "conf": face["confidence"]
+                        })
+
+            except Exception as e:
+                print(f"Error processing frame {fname}: {str(e)}")
+                continue
+
             detections.append(frame_detections)
 
         with open(os.path.join(self.args.pywork_path, "faces.pckl"), "wb") as f:
@@ -493,6 +502,7 @@ class Pipeline:
         min_face_size: int = 1,
         crop_scale: float = 0.40,
         device: Literal["auto", "cpu", "cuda", "mps"] = "auto",
+        detector_backend: str = "yolov8",
         dtype: Literal["float32", "float16", "bfloat16"] = "float32",
         **kwargs,
     ):
@@ -502,6 +512,7 @@ class Pipeline:
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
         }[dtype]
+        self.detector_backend: str = detector_backend
 
         self.video_path = video_path
 
