@@ -18,8 +18,6 @@ setup(
         "numpy>=1.23.5,<2.1.1",
         "ffmpeg>=1.4,<2.0",
         "torch>=2.0.0,<3.0.0",
-        "torchaudio>=2.0.0,<3.0.0",
-        "torchvision>=0.16.0,<0.22.0",
         "ultralytics>=8.3.117,<8.4.0",
         "huggingface-hub>=0.30.2",
         "tensorflow[and-cuda]>=2.15.0",
