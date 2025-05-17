@@ -22,9 +22,9 @@ setup(
         "torchvision>=0.21.0,<0.22.0",
         "ultralytics>=8.3.117,<8.4.0",
         "huggingface-hub>=0.30.2",
-        "tensorflow[and-cuda]==2.19.0",
+        # "tensorflow[and-cuda]==2.19.0",
         "deepface>=0.0.93,<0.0.94",
-        "tf-keras>=2.19.0,<3.0.0",
+        # "tf-keras>=2.19.0,<3.0.0",
     ],
     python_requires='>=3.12',
 )
