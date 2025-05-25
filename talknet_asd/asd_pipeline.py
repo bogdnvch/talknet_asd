@@ -324,8 +324,8 @@ class FaceProcessor:
         """Run face detection on all frames"""
         detections = []
         total_detection_time = 0.0
-        threshold = 0.6
-        max_size = 1920
+        threshold = self.args.face_detection_threshold
+        max_size = self.args.face_detection_max_size
         resize = 1
         if self.args.device == "cuda":
             gpu_id = 0 if torch.cuda.is_available() else -1
@@ -1037,6 +1037,8 @@ class Pipeline:
         face_detection_avg_time_threshold: float = 1.0,
         face_detection_min_frames_for_avg: int = 10,
         enable_skip_slow_face_detection: bool = False,
+        face_detection_threshold: float = 0.6,
+        face_detection_max_size: int = 2560,
         **kwargs,
     ):
         self.device = resolve_device(device=device)
@@ -1066,6 +1068,8 @@ class Pipeline:
         self.face_detection_avg_time_threshold = face_detection_avg_time_threshold
         self.face_detection_min_frames_for_avg = face_detection_min_frames_for_avg
         self.enable_skip_slow_face_detection = enable_skip_slow_face_detection
+        self.face_detection_threshold = face_detection_threshold
+        self.face_detection_max_size = face_detection_max_size
 
         self.pyavi_path = None
         self.pywork_path = None
