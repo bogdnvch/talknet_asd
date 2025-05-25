@@ -786,117 +786,192 @@ class ActiveSpeakerDetector:
         self.model.loadParameters(args.pretrain_model)
         self.model.eval()
 
+    @staticmethod
+    def _pad_audio_features(features, num_target_samples, num_mfcc_channels=13):
+        current_samples = features.shape[0]
+
+        if current_samples == 0:  # No audio to begin with
+            return numpy.zeros(
+                (num_target_samples, num_mfcc_channels), dtype=numpy.float32
+            )
+
+        if current_samples >= num_target_samples:  # Enough or more samples than target
+            return features[:num_target_samples, :]
+
+        # Determine the base for padding (the last 40ms chunk = 4 samples, or whatever is available if less)
+        if current_samples >= 4:
+            base_padding_chunk = features[-4:, :]
+        else:  # current_samples is 1, 2, or 3
+            repeats_needed = (4 + current_samples - 1) // current_samples
+            base_padding_chunk = numpy.tile(features, (repeats_needed, 1))[:4, :]
+
+        samples_to_add = num_target_samples - current_samples
+        # How many 4-sample chunks we need to generate to fill the gap
+        num_chunks_to_add = (samples_to_add + 3) // 4
+
+        padding_elements = [features]
+        for _ in range(num_chunks_to_add):
+            padding_elements.append(base_padding_chunk)
+
+        padded_features = numpy.vstack(padding_elements)
+        return padded_features[:num_target_samples, :]
+
+    @staticmethod
+    def _pad_video_frames(frames, num_target_frames, frame_height=112, frame_width=112):
+        current_frames_count = frames.shape[0]
+
+        if current_frames_count == 0:  # No video frames to begin with
+            return numpy.zeros(
+                (num_target_frames, frame_height, frame_width), dtype=numpy.uint8
+            )
+
+        if current_frames_count >= num_target_frames:  # Enough or more frames
+            return frames[:num_target_frames, :, :]
+
+        frames_to_add = num_target_frames - current_frames_count
+        last_frame = frames[-1:, :, :]  # Keep dimension for vstack/tile
+
+        padding_list = [frames]
+        # Efficiently create padding by tiling the last frame
+        padding_block = numpy.tile(last_frame, (frames_to_add, 1, 1))
+        padding_list.append(padding_block)
+
+        padded_frames = numpy.vstack(padding_list)
+        return padded_frames[:num_target_frames, :, :]
+
     def evaluate_network(self):
         # GPU: active speaker detection by pretrained TalkNet
         files = glob.glob("%s/*.avi" % self.args.pycrop_path)
         files.sort()
         all_scores = []
         duration_set = {1, 1, 1, 2, 2, 2, 3, 3, 4, 5, 6}
-        for file in tqdm.tqdm(files, total=len(files)):
-            file_name = os.path.splitext(file.split("/")[-1])[0]  # Load audio and video
+
+        for file_idx, file in tqdm.tqdm(
+            enumerate(files), total=len(files), desc="Evaluating ASD"
+        ):
+            file_name = os.path.splitext(os.path.basename(file))[0]
             print(f"[DEBUG] evaluate_network: Processing file {file_name}")
 
-            # Load raw audio features
-            _, audio_samples = wavfile.read(
+            _, audio_samples_raw_data = wavfile.read(
                 os.path.join(self.args.pycrop_path, file_name + ".wav")
             )
             audio_feature_raw = python_speech_features.mfcc(
-                audio_samples, 16000, numcep=13, winlen=0.025, winstep=0.010
+                audio_samples_raw_data, 16000, numcep=13, winlen=0.025, winstep=0.010
             )
 
-            # Load raw video features
-            video = cv2.VideoCapture(
+            video_cap = cv2.VideoCapture(
                 os.path.join(self.args.pycrop_path, file_name + ".avi")
             )
-            video_feature_list = []
-            while video.isOpened():
-                ret, frames = video.read()
-                if ret == True:
-                    face = cv2.cvtColor(frames, cv2.COLOR_BGR2GRAY)
+            video_feature_list_raw = []
+            while video_cap.isOpened():
+                ret, frame_img = video_cap.read()
+                if ret:
+                    face = cv2.cvtColor(frame_img, cv2.COLOR_BGR2GRAY)
                     face = cv2.resize(face, (224, 224))
                     face = face[
                         int(112 - (112 / 2)) : int(112 + (112 / 2)),
                         int(112 - (112 / 2)) : int(112 + (112 / 2)),
                     ]
-                    video_feature_list.append(face)
+                    video_feature_list_raw.append(face)
                 else:
                     break
-            video.release()
-            video_feature_raw = numpy.array(video_feature_list)
+            video_cap.release()
+            video_feature_raw = numpy.array(video_feature_list_raw)
 
-            num_audio_samples_raw = audio_feature_raw.shape[0]
+            num_audio_mfcc_samples_raw = audio_feature_raw.shape[0]
             num_video_frames_raw = video_feature_raw.shape[0]
 
-            print(
-                f"[DEBUG] evaluate_network: {file_name} - Raw Audio feature shape: {audio_feature_raw.shape}, Raw Video feature shape: {video_feature_raw.shape}"
+            # Default shape parameters (used if raw features are empty for padding)
+            audio_mfcc_channels = (
+                audio_feature_raw.shape[1] if num_audio_mfcc_samples_raw > 0 else 13
+            )
+            video_frame_h = (
+                video_feature_raw.shape[1] if num_video_frames_raw > 0 else 112
+            )
+            video_frame_w = (
+                video_feature_raw.shape[2] if num_video_frames_raw > 0 else 112
             )
 
-            # Determine common number of 40ms chunks (4 audio features, 1 video frame)
-            num_common_chunks = 0
-            if (
-                num_audio_samples_raw > 0 and num_video_frames_raw > 0
-            ):  # Ensure raw features are not empty
-                num_common_chunks = min(
-                    num_audio_samples_raw // 4, num_video_frames_raw
-                )
+            print(
+                f"[DEBUG] evaluate_network: {file_name} - Raw Audio MFCCs: {audio_feature_raw.shape}, Raw Video Frames: {video_feature_raw.shape}"
+            )
 
-            if num_common_chunks == 0:
+            if num_video_frames_raw == 0:
                 print(
-                    f"[DEBUG] evaluate_network: {file_name} - No common chunks. Audio samples: {num_audio_samples_raw}, Video frames: {num_video_frames_raw}. Producing all NaN scores."
+                    f"[WARN] evaluate_network: {file_name} - No video frames found. Appending empty scores array."
                 )
-                scores_this_file = numpy.full(num_video_frames_raw, numpy.nan)
-                all_scores.append(scores_this_file)
+                all_scores.append(numpy.array([]))
                 continue
 
-            audio_feature_for_model = audio_feature_raw[: num_common_chunks * 4, :]
-            video_feature_for_model = video_feature_raw[:num_common_chunks, :, :]
-
-            current_processing_length_seconds = num_common_chunks * 0.04
-
-            print(
-                f"[DEBUG] evaluate_network: {file_name} - Common chunks: {num_common_chunks}"
-            )
-            print(
-                f"[DEBUG] evaluate_network: {file_name} - Audio for model shape: {audio_feature_for_model.shape}, Video for model shape: {video_feature_for_model.shape}"
-            )
-            print(
-                f"[DEBUG] evaluate_network: {file_name} - Processing duration for model: {current_processing_length_seconds:.2f}s"
+            model_input_audio_chunks = num_audio_mfcc_samples_raw // 4
+            model_input_video_chunks = num_video_frames_raw
+            target_model_chunks = max(
+                model_input_audio_chunks, model_input_video_chunks
             )
 
-            model_scores_accumulator = []  # To store scores from different durations
+            if target_model_chunks == 0:
+                print(
+                    f"[WARN] evaluate_network: {file_name} - Both audio and video inputs are too short (target_model_chunks is 0). Scoring as all zeros for {num_video_frames_raw} frames."
+                )
+                all_scores.append(numpy.zeros(num_video_frames_raw))
+                continue
+
+            num_target_audio_samples_for_model = target_model_chunks * 4
+            audio_feature_for_model = self._pad_audio_features(
+                audio_feature_raw,
+                num_target_audio_samples_for_model,
+                audio_mfcc_channels,
+            )
+
+            num_target_video_frames_for_model = target_model_chunks
+            video_feature_for_model = self._pad_video_frames(
+                video_feature_raw,
+                num_target_video_frames_for_model,
+                video_frame_h,
+                video_frame_w,
+            )
+
+            print(
+                f"[DEBUG] evaluate_network: {file_name} - Target model chunks: {target_model_chunks}"
+            )
+            print(
+                f"[DEBUG] evaluate_network: {file_name} - Audio for model: {audio_feature_for_model.shape}, Video for model: {video_feature_for_model.shape}"
+            )
+
+            current_processing_length_seconds = target_model_chunks * 0.04
+            model_scores_accumulator = []
+
             for duration in duration_set:
                 if current_processing_length_seconds == 0:
-                    break  # No data to process
-                # Determine batch size based on the actual data length for the model
+                    break
                 batch_size = int(
                     math.ceil(current_processing_length_seconds / duration)
                 )
                 if batch_size == 0:
-                    continue  # Duration is longer than the entire segment
+                    continue
 
                 scores_for_duration = []
                 with torch.no_grad():
                     for i in range(batch_size):
-                        # Calculate start and end for audio and video segments
-                        # Ensures segments are taken from _for_model features and capped by current_processing_length_seconds
-
                         seg_start_sec = i * duration
                         seg_end_sec = min(
                             (i + 1) * duration, current_processing_length_seconds
                         )
-
                         actual_segment_duration_sec = seg_end_sec - seg_start_sec
 
                         if actual_segment_duration_sec <= 0:
-                            continue  # Should not happen if batch_size > 0
+                            continue
 
-                        audio_start_idx = int(seg_start_sec * 100)
-                        audio_end_idx = int(seg_end_sec * 100)  # Exclusive end
+                        audio_start_idx = int(
+                            seg_start_sec * 100
+                        )  # 100 MFCC vectors per second (1 per 10ms)
+                        audio_end_idx = int(seg_end_sec * 100)
 
-                        video_start_idx = int(seg_start_sec * 25)
-                        video_end_idx = int(seg_end_sec * 25)  # Exclusive end
+                        video_start_idx = int(
+                            seg_start_sec * 25
+                        )  # 25 video frames per second
+                        video_end_idx = int(seg_end_sec * 25)
 
-                        # Slice from the aligned features
                         input_a_segment = audio_feature_for_model[
                             audio_start_idx:audio_end_idx, :
                         ]
@@ -908,10 +983,8 @@ class ActiveSpeakerDetector:
                             input_a_segment.shape[0] == 0
                             or input_v_segment.shape[0] == 0
                         ):
-                            # This could happen if a segment is too small (e.g. <10ms for audio or <40ms for video)
-                            # Or due to floating point inaccuracies leading to start_idx == end_idx
                             print(
-                                f"[WARN] evaluate_network: {file_name} - Empty segment for duration {duration}, batch {i}. Skipping."
+                                f"[WARN] evaluate_network: {file_name} - Empty segment for duration {duration}, batch {i}. Audio shape: {input_a_segment.shape}, Video shape: {input_v_segment.shape}. Skipping."
                             )
                             continue
 
@@ -925,22 +998,21 @@ class ActiveSpeakerDetector:
                             .unsqueeze(0)
                             .to(self.args.device, dtype=self.dtype)
                         )
+
                         embed_a = self.model.model.forward_audio_frontend(input_a)
                         embed_v = self.model.model.forward_visual_frontend(input_v)
 
                         if embed_a.size(1) != embed_v.size(1):
                             print(
-                                f"[WARN] evaluate_network: {file_name} - Despite aligned inputs, embed lengths differ (audio: {embed_a.size(1)}, video: {embed_v.size(1)}). Duration: {duration}s, Batch: {i}. Segment duration: {actual_segment_duration_sec:.2f}s. Truncating."
+                                f"[WARN] evaluate_network: {file_name} - Embed lengths differ (A:{embed_a.size(1)}, V:{embed_v.size(1)}) Duration:{duration}s, Batch:{i}. Truncating."
                             )
                             min_len = min(embed_a.size(1), embed_v.size(1))
                             embed_a = embed_a[:, :min_len, :]
                             embed_v = embed_v[:, :min_len, :]
 
-                        if (
-                            embed_a.size(1) == 0
-                        ):  # If sequence length became zero after potential truncation
+                        if embed_a.size(1) == 0:
                             print(
-                                f"[WARN] evaluate_network: {file_name} - Zero sequence length for embeddings. Skipping batch."
+                                f"[WARN] evaluate_network: {file_name} - Zero sequence length for embeddings after potential truncation. Skipping batch."
                             )
                             continue
 
@@ -952,85 +1024,76 @@ class ActiveSpeakerDetector:
                         )
                         score_from_model = self.model.lossAV.forward(out, labels=None)
                         scores_for_duration.extend(score_from_model)
-                if (
-                    scores_for_duration
-                ):  # Only append if scores were actually generated for this duration
+
+                if scores_for_duration:
                     model_scores_accumulator.append(scores_for_duration)
 
             computed_model_scores = numpy.array([])
             if model_scores_accumulator:
-                # Need to handle cases where different durations might produce slightly different numbers of scores
-                # if the segments didn't align perfectly with the model's internal stride for all durations.
-                # The most robust way is to average scores that correspond to the same output time steps.
-                # For simplicity, the original code averages over the duration runs, assuming they all produce
-                # score sequences of the same length (num_common_chunks, if the model output 1 score per 40ms chunk).
-                # Let's try to match this behavior. If lengths vary, np.mean will fail.
-                # We expect each item in model_scores_accumulator to have length num_common_chunks.
+                # Average scores across different duration runs
+                # This part assumes each duration run ideally produces `target_model_chunks` scores
+                min_len_across_durations = (
+                    min(len(s) for s in model_scores_accumulator)
+                    if model_scores_accumulator
+                    else 0
+                )
+                if (
+                    min_len_across_durations != target_model_chunks
+                    and min_len_across_durations > 0
+                ):  # if any list is shorter but not empty
+                    print(
+                        f"[WARN] evaluate_network: {file_name} - Score lists from durations have inconsistent lengths. Shortest: {min_len_across_durations}, Expected: {target_model_chunks}. Truncating all to shortest for averaging."
+                    )
 
-                # Check if all score lists in model_scores_accumulator have the same length
-                consistent_len = -1
-                is_consistent = True
-                if model_scores_accumulator:
-                    consistent_len = len(model_scores_accumulator[0])
-                    for s_list in model_scores_accumulator:
-                        if len(s_list) != consistent_len:
-                            is_consistent = False
-                            print(
-                                f"[WARN] evaluate_network: {file_name} - Score lists from different durations have inconsistent lengths. Expected {consistent_len}, got {len(s_list)}. This may affect averaging."
-                            )
-                            break  # No need to check further for this file
+                # Truncate all score lists to the minimum consistent length (ideally target_model_chunks)
+                processed_accumulator = []
+                for s_list in model_scores_accumulator:
+                    if (
+                        len(s_list) >= min_len_across_durations
+                        and min_len_across_durations > 0
+                    ):
+                        processed_accumulator.append(s_list[:min_len_across_durations])
 
-                if is_consistent and consistent_len > 0:
+                if processed_accumulator:
                     try:
                         computed_model_scores = numpy.round(
-                            (numpy.mean(numpy.array(model_scores_accumulator), axis=0)),
-                            1,
+                            (numpy.mean(numpy.array(processed_accumulator), axis=0)), 1
                         ).astype(float)
                     except Exception as e:
                         print(
                             f"[ERROR] evaluate_network: {file_name} - Error during score averaging: {e}. Computed scores will be empty."
                         )
-                        computed_model_scores = numpy.array([])
-
-                elif (
-                    consistent_len == 0 and not model_scores_accumulator[0]
-                ):  # All lists were empty
+                        computed_model_scores = numpy.array(
+                            []
+                        )  # Ensure it's an array for .size
+                else:  # All score lists were empty or became empty after truncation
                     computed_model_scores = numpy.array([])
-                else:  # Inconsistent lengths or first list was empty but others might not be (should not happen)
-                    print(
-                        f"[WARN] evaluate_network: {file_name} - Could not average scores due to inconsistencies or empty lists. Using scores from the first valid duration run if available, or empty."
-                    )
-                    # Fallback: try to use scores from the first duration run if it's valid and matches num_common_chunks
-                    if (
-                        model_scores_accumulator
-                        and len(model_scores_accumulator[0]) == num_common_chunks
-                    ):
-                        computed_model_scores = numpy.round(
-                            numpy.array(model_scores_accumulator[0]), 1
-                        ).astype(float)
-                    else:  # Give up on averaging
-                        computed_model_scores = numpy.array([])
 
-            final_scores_this_file = numpy.full(
-                num_video_frames_raw, numpy.nan
-            )  # Default NaN
+            final_scores_this_file = numpy.zeros(
+                num_video_frames_raw
+            )  # Default to zeros
 
             if computed_model_scores.size > 0:
-                # Ensure computed_model_scores length is what we expect (num_common_chunks)
-                if len(computed_model_scores) == num_common_chunks:
-                    final_scores_this_file[:num_common_chunks] = computed_model_scores
-                else:
-                    print(
-                        f"[ERROR] evaluate_network: {file_name} - Averaged scores length {len(computed_model_scores)} != num_common_chunks {num_common_chunks}. Padding with NaNs."
-                    )
-                    # Fill what we can, rest remains NaN
-                    fill_len = min(len(computed_model_scores), num_common_chunks)
-                    final_scores_this_file[:fill_len] = computed_model_scores[:fill_len]
+                # computed_model_scores corresponds to target_model_chunks
+                # final_scores_this_file needs to be num_video_frames_raw long
+
+                len_to_copy = min(computed_model_scores.size, num_video_frames_raw)
+                final_scores_this_file[:len_to_copy] = computed_model_scores[
+                    :len_to_copy
+                ]
+
+                # If original video was longer than the scores we have (after mapping from target_model_chunks)
+                # This happens if num_video_frames_raw > computed_model_scores.size (which is min_len_across_durations)
+                if num_video_frames_raw > len_to_copy and len_to_copy > 0:
+                    last_valid_score = final_scores_this_file[len_to_copy - 1]
+                    final_scores_this_file[len_to_copy:] = last_valid_score
+            # If computed_model_scores.size is 0, final_scores_this_file remains all zeros (num_video_frames_raw long)
 
             all_scores.append(final_scores_this_file)
             print(
-                f"[DEBUG] evaluate_network: {file_name} - Final scores for this file (first 5 of {len(final_scores_this_file)}): {final_scores_this_file[:5]}"
+                f"[DEBUG] evaluate_network: {file_name} - Final scores (len {len(final_scores_this_file)}, first 5): {final_scores_this_file[:5]}"
             )
+
         print(time.strftime("%Y-%m-%d %H:%M:%S") + " Scores extracted")
         return all_scores
 
