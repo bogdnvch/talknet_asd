@@ -860,17 +860,14 @@ class ActiveSpeakerDetector:
                         )
                         embed_a = self.model.model.forward_audio_frontend(input_a)
                         embed_v = self.model.model.forward_visual_frontend(input_v)
-                        print("embed_a", embed_a.shape)
-                        print("embed_v", embed_v.shape)
-
                         # Ensure sequence lengths are the same before cross-attention
-                        if embed_a.size(2) != embed_v.size(2):
+                        if embed_a.size(1) != embed_v.size(1):
                             print(
-                                f"[DEBUG] evaluate_network: {file_name} - Audio and video sequence lengths are different (audio: {embed_a.size(2)}, video: {embed_v.size(2)}). Truncating to the shorter length."
+                                f"[DEBUG] evaluate_network: {file_name} - Audio and video sequence lengths are different (audio: {embed_a.size(1)}, video: {embed_v.size(1)}). Truncating to the shorter length."
                             )
-                            min_len = min(embed_a.size(2), embed_v.size(2))
-                            embed_a = embed_a[:, :, :min_len]
-                            embed_v = embed_v[:, :, :min_len]
+                            min_len = min(embed_a.size(1), embed_v.size(1))
+                            embed_a = embed_a[:, :min_len, :]
+                            embed_v = embed_v[:, :min_len, :]
 
                         context_a, context_v = self.model.model.forward_cross_attention(
                             embed_a, embed_v
