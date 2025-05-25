@@ -44,7 +44,7 @@ cache_dir.mkdir(parents=True, exist_ok=True)
 
 
 def visualization(tracks, scores, args):
-    flist = glob.glob(os.path.join(args.pyframes_path, "*.jpg"))
+    flist = glob.glob(os.path.join(args.pyframes_path, "*.png"))
     flist.sort()
     faces = [[] for i in range(len(flist))]
     for tidx, track in enumerate(tracks):
@@ -113,21 +113,46 @@ class VideoPreprocessor:
         self.args = args
 
     def extract_video(self):
-        """Extract video to frames"""
-        self.args.video_file_path = os.path.join(self.args.pyavi_path, "video.avi")
-        command = (
-            "ffmpeg -y -i %s -qscale:v 2 -threads %d -async 1 -r 25 %s -loglevel panic"
-            % (
-                self.args.video_path,
-                self.args.n_data_loader_thread,
-                self.args.video_file_path,
+        """Extract video to frames. Converts to 25 FPS if necessary."""
+        cap = cv2.VideoCapture(self.args.video_path)
+        fps = 0.0
+        if cap.isOpened():
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            cap.release()
+
+        # Use a small tolerance for floating point comparison of FPS
+        if fps > 0 and abs(fps - 25.0) < 0.01:
+            self.args.video_file_path = self.args.video_path
+            sys.stderr.write(
+                time.strftime("%Y-%m-%d %H:%M:%S")
+                + f" Input video '{self.args.video_path}' is already {fps:.2f} FPS. Using original video directly.\\r\\n"
             )
-        )
-        subprocess.call(command, shell=True)
-        sys.stderr.write(
-            time.strftime("%Y-%m-%d %H:%M:%S")
-            + " Extract the video and save in %s \r\n" % self.args.video_file_path
-        )
+        else:
+            self.args.video_file_path = os.path.join(self.args.pyavi_path, "video.avi")
+            if fps > 0:
+                sys.stderr.write(
+                    time.strftime("%Y-%m-%d %H:%M:%S")
+                    + f" Input video '{self.args.video_path}' has {fps:.2f} FPS. Converting to 25 FPS.\\r\\n"
+                )
+            else:
+                sys.stderr.write(
+                    time.strftime("%Y-%m-%d %H:%M:%S")
+                    + f" Could not determine FPS for input video '{self.args.video_path}'. Attempting conversion to 25 FPS.\\r\\n"
+                )
+
+            command = (
+                "ffmpeg -y -i %s -threads %d -async 1 -r 25 %s -loglevel panic"
+                % (
+                    self.args.video_path,
+                    self.args.n_data_loader_thread,
+                    self.args.video_file_path,
+                )
+            )
+            subprocess.call(command, shell=True)
+            sys.stderr.write(
+                time.strftime("%Y-%m-%d %H:%M:%S")
+                + " Processed video saved in %s \\r\\n" % self.args.video_file_path
+            )
 
     def extract_audio(self):
         """Extract audio track"""
@@ -148,13 +173,10 @@ class VideoPreprocessor:
 
     def extract_frames(self):
         """Extract individual frames"""
-        command = (
-            "ffmpeg -y -i %s -qscale:v 2 -threads %d -f image2 %s -loglevel panic"
-            % (
-                self.args.video_file_path,
-                self.args.n_data_loader_thread,
-                os.path.join(self.args.pyframes_path, "%06d.jpg"),
-            )
+        command = "ffmpeg -y -i %s -threads %d -f image2 %s -loglevel panic" % (
+            self.args.video_file_path,
+            self.args.n_data_loader_thread,
+            os.path.join(self.args.pyframes_path, "%06d.png"),
         )
         subprocess.call(command, shell=True, stdout=None)
         sys.stderr.write(
@@ -268,7 +290,7 @@ class FaceProcessor:
 
     def detect_faces(self):
         """Run face detection on all frames"""
-        flist = glob.glob(os.path.join(self.args.pyframes_path, "*.jpg"))
+        flist = glob.glob(os.path.join(self.args.pyframes_path, "*.png"))
         flist.sort()
         detections = []
 
@@ -460,7 +482,7 @@ class FaceProcessor:
         self.args.audio_file_path = os.path.join(self.args.pyavi_path, "audio.wav")
 
         flist = glob.glob(
-            os.path.join(self.args.pyframes_path, "*.jpg")
+            os.path.join(self.args.pyframes_path, "*.png")
         )  # Read the frames
         flist.sort()
         vOut = cv2.VideoWriter(
