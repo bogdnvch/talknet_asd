@@ -256,32 +256,55 @@ class FaceProcessor:
 
         total_detection_time = 0.0
         start_time = time.time()
+        threshold = 0.5  # confidence threshold
+        max_size = 1080
+        resize = 1
 
         pbar = tqdm.tqdm(flist, total=len(flist), desc="Detecting faces")
+
+        from batch_face import RetinaFace
+
+        detector = RetinaFace(gpu_id=0)
 
         for fidx, fname in enumerate(pbar):
             frame_start_time = time.time()
             frame_detections = []
             try:
-                faces = DeepFace.extract_faces(
-                    img_path=fname,
-                    detector_backend=self.detector_backend,
-                    align=True,
-                    enforce_detection=False,
+                img = cv2.imread(fname)
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+                faces = detector(
+                    img,
+                    threshold=threshold,
+                    resize=resize,
+                    max_size=max_size,
+                    return_dict=True,
                 )
+                # face = faces[0]
+                # box = face['box']
+                # kps = face['kps']
+                # score = face['score']
 
                 if isinstance(faces, list) and len(faces) > 0:
                     for face in faces:
-                        facial_area = face.get("facial_area", {})
-                        if not all(key in facial_area for key in ["x", "y", "w", "h"]):
-                            continue
+                        facial_area = face["box"]
+                        if isinstance(facial_area, dict):
+                            if not all(
+                                key in facial_area for key in ["x", "y", "w", "h"]
+                            ):
+                                continue
 
-                        x = facial_area["x"]
-                        y = facial_area["y"]
-                        w = facial_area["w"]
-                        h = facial_area["h"]
+                            x = facial_area["x"]
+                            y = facial_area["y"]
+                            w = facial_area["w"]
+                            h = facial_area["h"]
+                        else:
+                            x = facial_area[0]
+                            y = facial_area[1]
+                            w = facial_area[2]
+                            h = facial_area[3]
 
-                        if face.get("confidence", 0) < 0.5:
+                        if face.get("score", 0) < threshold:
                             continue
 
                         if w <= 0 or h <= 0:
@@ -290,7 +313,7 @@ class FaceProcessor:
                         bbox = [x, y, x + w, y + h]
 
                         frame_detections.append(
-                            {"frame": fidx, "bbox": bbox, "conf": face["confidence"]}
+                            {"frame": fidx, "bbox": bbox, "conf": face["score"]}
                         )
 
             except Exception as e:
