@@ -44,58 +44,97 @@ cache_dir.mkdir(parents=True, exist_ok=True)
 
 
 def visualization(tracks, scores, args):
-    flist = glob.glob(os.path.join(args.pyframes_path, "*.png"))
-    flist.sort()
-    faces = [[] for i in range(len(flist))]
+    cap = cv2.VideoCapture(args.video_file_path)
+    if not cap.isOpened():
+        sys.stderr.write(
+            f"Error: Could not open video file {args.video_file_path} for visualization.\\r\\n"
+        )
+        return
+
+    num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    if num_frames == 0 or fw == 0 or fh == 0:
+        sys.stderr.write(
+            f"Error: Video file {args.video_file_path} appears to have no frames or invalid dimensions for visualization.\\r\\n"
+        )
+        cap.release()
+        return
+
+    faces = [[] for _ in range(num_frames)]
     for tidx, track in enumerate(tracks):
         score = scores[tidx]
-        for fidx, frame in enumerate(track["track"]["frame"].tolist()):
-            s = score[
-                max(fidx - 2, 0) : min(fidx + 3, len(score) - 1)
-            ]  # average smoothing
-            s = numpy.mean(s)
-            faces[frame].append(
-                {
-                    "track": tidx,
-                    "score": float(s),
-                    "s": track["proc_track"]["s"][fidx],
-                    "x": track["proc_track"]["x"][fidx],
-                    "y": track["proc_track"]["y"][fidx],
-                }
-            )
-    firstImage = cv2.imread(flist[0])
-    fw = firstImage.shape[1]
-    fh = firstImage.shape[0]
+        # Ensure track["track"]["frame"] contains valid frame indices within num_frames
+        for fidx_in_track, frame_num in enumerate(track["track"]["frame"].tolist()):
+            if 0 <= frame_num < num_frames:
+                s = score[
+                    max(fidx_in_track - 2, 0) : min(fidx_in_track + 3, len(score) - 1)
+                ]  # average smoothing
+                s = numpy.mean(s)
+                faces[frame_num].append(
+                    {
+                        "track": tidx,
+                        "score": float(s),
+                        "s": track["proc_track"]["s"][fidx_in_track],
+                        "x": track["proc_track"]["x"][fidx_in_track],
+                        "y": track["proc_track"]["y"][fidx_in_track],
+                    }
+                )
+            else:
+                sys.stderr.write(
+                    f"Warning: Invalid frame number {frame_num} in track {tidx}. Max frames: {num_frames}. Skipping this entry.\\r\\n"
+                )
+
     vOut = cv2.VideoWriter(
         os.path.join(args.pyavi_path, "video_only.avi"),
         cv2.VideoWriter_fourcc(*"XVID"),
-        25,
+        25,  # Assuming 25 FPS output, consistent with original
         (fw, fh),
     )
     colorDict = {0: 0, 1: 255}
-    for fidx, fname in tqdm.tqdm(enumerate(flist), total=len(flist)):
-        image = cv2.imread(fname)
-        for face in faces[fidx]:
-            clr = colorDict[int((face["score"] >= 0))]
-            txt = round(face["score"], 1)
+
+    for fidx in tqdm.tqdm(range(num_frames), total=num_frames, desc="Visualizing"):
+        ret, image = cap.read()
+        if not ret:
+            sys.stderr.write(
+                f"Warning: Could not read frame {fidx} during visualization. Stopping.\\r\\n"
+            )
+            break
+
+        for face_info in faces[fidx]:
+            clr = colorDict[int((face_info["score"] >= 0))]
+            txt = round(face_info["score"], 1)
             cv2.rectangle(
                 image,
-                (int(face["x"] - face["s"]), int(face["y"] - face["s"])),
-                (int(face["x"] + face["s"]), int(face["y"] + face["s"])),
+                (
+                    int(face_info["x"] - face_info["s"]),
+                    int(face_info["y"] - face_info["s"]),
+                ),
+                (
+                    int(face_info["x"] + face_info["s"]),
+                    int(face_info["y"] + face_info["s"]),
+                ),
                 (0, clr, 255 - clr),
                 10,
             )
             cv2.putText(
                 image,
                 "%s" % (txt),
-                (int(face["x"] - face["s"]), int(face["y"] - face["s"])),
+                (
+                    int(face_info["x"] - face_info["s"]),
+                    int(face_info["y"] - face_info["s"]),
+                ),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.5,
                 (0, clr, 255 - clr),
                 5,
             )
         vOut.write(image)
+
     vOut.release()
+    cap.release()
+
     command = (
         "ffmpeg -y -i %s -i %s -threads %d -c:v copy -c:a copy %s -loglevel panic"
         % (
@@ -290,26 +329,47 @@ class FaceProcessor:
 
     def detect_faces(self):
         """Run face detection on all frames"""
-        flist = glob.glob(os.path.join(self.args.pyframes_path, "*.png"))
-        flist.sort()
         detections = []
-
         total_detection_time = 0.0
-        threshold = 0.6  # confidence threshold
+        threshold = 0.6
         max_size = 1920
         resize = 1
-
-        pbar = tqdm.tqdm(flist, total=len(flist), desc="Detecting faces")
 
         is_cuda_available = torch.cuda.is_available()
         gpu_id = 0 if is_cuda_available else -1
         detector = RetinaFace(gpu_id=gpu_id, fp16=True)
 
-        for fidx, fname in enumerate(pbar):
+        cap = cv2.VideoCapture(self.args.video_file_path)
+        if not cap.isOpened():
+            sys.stderr.write(
+                f"Error: Could not open video file {self.args.video_file_path}\\r\\n"
+            )
+            return False, detections
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames == 0:
+            sys.stderr.write(
+                f"Error: Video file {self.args.video_file_path} appears to have no frames or is corrupted.\\r\\n"
+            )
+            cap.release()
+            return False, detections
+
+        pbar = tqdm.tqdm(
+            range(total_frames), total=total_frames, desc="Detecting faces"
+        )
+
+        for fidx in pbar:
             frame_start_time = time.time()
             frame_detections = []
+
+            ret, img = cap.read()
+            if not ret:
+                sys.stderr.write(
+                    f"Warning: Could not read frame at index {fidx} from {self.args.video_file_path}. Stopping detection.\\r\\n"
+                )
+                break  # Stop if a frame cannot be read
+
             try:
-                img = cv2.imread(fname)
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
                 faces = detector(
@@ -322,7 +382,7 @@ class FaceProcessor:
                 if isinstance(faces, list) and len(faces) > 0:
                     for face in faces:
                         facial_area = face["box"]
-                        if face.get("score", 0) < threshold:
+                        if face["score"] < threshold:
                             continue
                         if isinstance(facial_area, dict):
                             if not all(
@@ -350,7 +410,14 @@ class FaceProcessor:
                         )
 
             except Exception as e:
-                print(f"Error processing frame {fname}: {str(e)}")
+                print(f"Error processing frame at index {fidx}: {str(e)}")
+                # Continue to the next frame even if one frame fails
+                detections.append(
+                    []
+                )  # Append empty list for this failed frame to keep indices correct
+                total_detection_time += (
+                    time.time() - frame_start_time
+                )  # count this frame's attempt time
                 continue
 
             detections.append(frame_detections)
@@ -367,9 +434,12 @@ class FaceProcessor:
                         time.strftime("%Y-%m-%d %H:%M:%S")
                         + f" Face detection too slow (avg {avg_time_per_frame:.2f}s/frame > "
                         + f"{self.args.face_detection_avg_time_threshold:.2f}s/frame). "
-                        + f"Skipping video {self.args.video_path}.\r\n"
+                        + f"Skipping video {self.args.video_path}.\\r\\n"
                     )
+                    cap.release()
                     return False, detections  # Abort and signal failure
+
+        cap.release()
 
         with open(os.path.join(self.args.pywork_path, "faces.pckl"), "wb") as f:
             pickle.dump(detections, f)
@@ -469,22 +539,35 @@ class FaceProcessor:
 
     def video_tracks(self, all_tracks):
         video_tracks = []
-        for ii, track in enumerate(all_tracks):
-            video_tracks.append(
-                self.crop_video(track, os.path.join(self.args.pycrop_path, f"{ii:05d}"))
-            )
+        main_video_cap = cv2.VideoCapture(self.args.video_file_path)
 
-        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} Face Crop")
+        if not main_video_cap.isOpened():
+            sys.stderr.write(
+                f"Error: Could not open video file {self.args.video_file_path} in video_tracks method.\\r\\n"
+            )
+            return []
+
+        try:
+            for ii, track in tqdm.tqdm(
+                enumerate(all_tracks), total=len(all_tracks), desc="Cropping tracks"
+            ):
+                video_tracks.append(
+                    self.crop_video(
+                        main_video_cap,
+                        track,
+                        os.path.join(self.args.pycrop_path, f"{ii:05d}"),
+                    )
+                )
+        finally:
+            main_video_cap.release()  # Ensure the video capture is released
+
+        print(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} Face Crop completed")
 
         return video_tracks
 
-    def crop_video(self, track, cropFile):
+    def crop_video(self, main_video_cap, track, cropFile):
         self.args.audio_file_path = os.path.join(self.args.pyavi_path, "audio.wav")
 
-        flist = glob.glob(
-            os.path.join(self.args.pyframes_path, "*.png")
-        )  # Read the frames
-        flist.sort()
         vOut = cv2.VideoWriter(
             cropFile + "t.avi", cv2.VideoWriter_fourcc(*"XVID"), 25, (224, 224)
         )  # Write video
@@ -496,27 +579,85 @@ class FaceProcessor:
         dets["s"] = signal.medfilt(dets["s"], kernel_size=13)  # Smooth detections
         dets["x"] = signal.medfilt(dets["x"], kernel_size=13)
         dets["y"] = signal.medfilt(dets["y"], kernel_size=13)
-        for fidx, frame in enumerate(track["frame"]):
+
+        original_frames_to_crop = track["frame"]
+
+        for fidx_in_track, original_frame_num in enumerate(original_frames_to_crop):
+            # Seek to the specific frame in the main video
+            main_video_cap.set(cv2.CAP_PROP_POS_FRAMES, original_frame_num)
+            ret, image = main_video_cap.read()
+
+            if not ret:
+                sys.stderr.write(
+                    f"Warning: Could not read frame {original_frame_num} (index {fidx_in_track} in track) from {self.args.video_file_path} during crop_video. Skipping frame.\\r\\n"
+                )
+                continue  # Skip this frame if not readable
+
             cs = self.args.crop_scale
-            bs = dets["s"][fidx]  # Detection box size
+            bs = dets["s"][
+                fidx_in_track
+            ]  # Detection box size, use fidx_in_track for dets
             bsi = int(bs * (1 + 2 * cs))  # Pad videos by this amount
-            image = cv2.imread(flist[frame])
-            frame = numpy.pad(
+
+            # Pad the image correctly
+            # Ensure image is not None before padding
+            if image is None:
+                sys.stderr.write(
+                    f"Warning: Image for frame {original_frame_num} is None before padding. Skipping frame.\\r\\n"
+                )
+                continue
+
+            padded_image = numpy.pad(
                 image,
                 ((bsi, bsi), (bsi, bsi), (0, 0)),
                 "constant",
-                constant_values=(110, 110),
+                constant_values=(
+                    110,
+                    110,
+                ),  # Using default padding color from original code
             )
-            my = dets["y"][fidx] + bsi  # BBox center Y
-            mx = dets["x"][fidx] + bsi  # BBox center X
-            face = frame[
-                int(my - bs) : int(my + bs * (1 + 2 * cs)),
-                int(mx - bs * (1 + cs)) : int(mx + bs * (1 + cs)),
+            my = dets["y"][fidx_in_track] + bsi  # BBox center Y
+            mx = dets["x"][fidx_in_track] + bsi  # BBox center X
+
+            # Ensure cropping indices are valid
+            y_start, y_end = int(my - bs), int(my + bs * (1 + 2 * cs))
+            x_start, x_end = int(mx - bs * (1 + cs)), int(mx + bs * (1 + cs))
+
+            if not (
+                y_start < y_end
+                and x_start < x_end
+                and y_start >= 0
+                and x_start >= 0
+                and y_end <= padded_image.shape[0]
+                and x_end <= padded_image.shape[1]
+            ):
+                sys.stderr.write(
+                    f"Warning: Invalid crop dimensions for frame {original_frame_num}. Skipping frame. \
+                    y_start={y_start}, y_end={y_end}, x_start={x_start}, x_end={x_end}, padded_shape={padded_image.shape}\\r\\n"
+                )
+                continue
+
+            face = padded_image[
+                y_start:y_end,
+                x_start:x_end,
             ]
+
+            if face.size == 0:
+                sys.stderr.write(
+                    f"Warning: Cropped face for frame {original_frame_num} is empty. Skipping frame.\\r\\n"
+                )
+                continue
+
             vOut.write(cv2.resize(face, (224, 224)))
+
         audioTmp = cropFile + ".wav"
-        audioStart = (track["frame"][0]) / 25
-        audioEnd = (track["frame"][-1] + 1) / 25
+        # Use the first and last original frame numbers for audio start/end times
+        audioStart = (
+            (original_frames_to_crop[0]) / 25.0
+        )  # Assuming 25 FPS for audio sync
+        audioEnd = (
+            original_frames_to_crop[-1] + 1
+        ) / 25.0  # +1 to include the last frame's duration
         vOut.release()
         command = (
             "ffmpeg -y -i %s -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 -threads %d -ss %.3f -to %.3f %s -loglevel panic"
@@ -688,7 +829,6 @@ class Pipeline:
         self.enable_skip_slow_face_detection = enable_skip_slow_face_detection
 
         self.pyavi_path = None
-        self.pyframes_path = None
         self.pywork_path = None
         self.pycrop_path = None
 
@@ -705,14 +845,12 @@ class Pipeline:
 
     def _setup_paths(self):
         self.pyavi_path = self.save_path / "pyavi"
-        self.pyframes_path = self.save_path / "pyframes"
         self.pywork_path = self.save_path / "pywork"
         self.pycrop_path = self.save_path / "pycrop"
 
         self._cleanup_cache()
 
         self.pyavi_path.mkdir(parents=True, exist_ok=True)
-        self.pyframes_path.mkdir(parents=True, exist_ok=True)
         self.pywork_path.mkdir(parents=True, exist_ok=True)
         self.pycrop_path.mkdir(parents=True, exist_ok=True)
 
@@ -728,7 +866,6 @@ class Pipeline:
             # 1. Extract and prepare media
             self.video_preprocessor.extract_video()
             self.video_preprocessor.extract_audio()
-            self.video_preprocessor.extract_frames()
 
             # 2. Face processing
             scenes = self.face_processor.scenes_detect()
