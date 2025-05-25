@@ -456,9 +456,14 @@ class FaceProcessor:
             if (
                 shot[1].frame_num - shot[0].frame_num >= self.args.min_track
             ):  # Discard the shot frames less than min_track frames
+                # Pass scene_end_frame_abs to track_shot
+                scene_end_frame_abs = shot[1].frame_num
+                print(f"TRACK_FACES: Processing shot from {shot[0].frame_num} to {scene_end_frame_abs}")
+                current_scene_detections = face_detections[shot[0].frame_num : scene_end_frame_abs + 1]
                 all_tracks.extend(
                     self.track_shot(
-                        face_detections[shot[0].frame_num : shot[1].frame_num + 1]
+                        current_scene_detections,
+                        scene_end_frame_abs
                     )
                 )  # 'frames' to present this tracks' timestep, 'bbox' presents the location of the faces
         sys.stderr.write(
@@ -467,7 +472,7 @@ class FaceProcessor:
         )
         return all_tracks
 
-    def track_shot(self, sceneFaces):
+    def track_shot(self, sceneFaces, scene_end_frame_abs):
         iouThres = 0.5  # Minimum IOU between consecutive face detections
         tracks = []
         while True:
@@ -513,6 +518,15 @@ class FaceProcessor:
                     )
                     > self.args.min_face_size
                 ):
+                    print(f"TRACK_SHOT: Scene end frame (absolute): {scene_end_frame_abs}")
+                    print(f"TRACK_SHOT: Track original detected frames (absolute): {frameNum[0]} to {frameNum[-1]}")
+                    print(f"TRACK_SHOT: Track interpolated frames (frameI - absolute): {frameI[0]} to {frameI[-1]}")
+                    if frameI[-1] < scene_end_frame_abs:
+                        print(f"TRACK_SHOT: WARNING - Track's last interpolated frame {frameI[-1]} is less than scene end frame {scene_end_frame_abs}.")
+                    elif frameI[-1] > scene_end_frame_abs:
+                        print(f"TRACK_SHOT: WARNING - Track's last interpolated frame {frameI[-1]} is greater than scene end frame {scene_end_frame_abs}.")
+                    else:
+                        print(f"TRACK_SHOT: Track's last interpolated frame {frameI[-1]} matches scene end frame {scene_end_frame_abs}.")
                     tracks.append(
                         {
                             "frame": frameI,
@@ -701,6 +715,7 @@ class ActiveSpeakerDetector:
         duration_set = {1, 1, 1, 2, 2, 2, 3, 3, 4, 5, 6}
         for file in tqdm.tqdm(files, total=len(files)):
             file_name = os.path.splitext(file.split("/")[-1])[0]  # Load audio and video
+            print(f"EVALUATE_NETWORK: Processing file: {file}")
             _, audio = wavfile.read(
                 os.path.join(self.args.pycrop_path, file_name + ".wav")
             )
@@ -729,6 +744,8 @@ class ActiveSpeakerDetector:
                 audio_feature.shape[0] / 100,
                 video_feature.shape[0] / 25,
             )
+            print(f"EVALUATE_NETWORK: File {file_name} - Audio feature shape: {audio_feature.shape}, Video feature shape: {video_feature.shape}")
+            print(f"EVALUATE_NETWORK: File {file_name} - Calculated length (seconds): {length:.2f}")
             audio_feature = audio_feature[: int(round(length * 100)), :]
             video_feature = video_feature[: int(round(length * 25)), :, :]
             all_score = []  # Evaluation use TalkNet
