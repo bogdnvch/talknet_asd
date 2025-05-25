@@ -348,7 +348,7 @@ class FaceProcessor:
         batch_size = self.args.face_detection_batch_size
 
         gpu_id = 0 if self.args.device == torch.device("cuda") else -1
-        fp16_enabled = True if self.args.dtype == "float16" else False
+        fp16_enabled = self.args.dtype == torch.float16
         detector_instance = RetinaFace(gpu_id=gpu_id, fp16=fp16_enabled)
         print(f"Detector instance device: {detector_instance.device}")
         print(f"Detector instance model dtype: fp16={detector_instance.fp16}")
