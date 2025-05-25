@@ -27,11 +27,12 @@ from scenedetect import (
     StatsManager,
     SceneDetector,
     SceneList,
+    FrameTimecode,
 )
 
 
 from huggingface_hub import hf_hub_download
-# from deepface import DeepFace
+from batch_face import RetinaFace
 
 from talknet_asd.talkNet import talkNet
 from talknet_asd.utils.resolve_device import resolve_device
@@ -198,34 +199,6 @@ class FaceProcessor:
         end_time: Optional[Union[str, float, int]] = None,
         start_in_scene: bool = False,
     ) -> SceneList:
-        """Perform scene detection on a given video `path` using the specified `detector`.
-
-        Arguments:
-            video_path: Path to input video (absolute or relative to working directory).
-            detector: A `SceneDetector` instance (see :mod:`scenedetect.detectors` for a full list
-                of detectors).
-            stats_file_path: Path to save per-frame metrics to for statistical analysis or to
-                determine a better threshold value.
-            show_progress: Show a progress bar with estimated time remaining. Default is False.
-            start_time: Starting point in video, in the form of a timecode ``HH:MM:SS[.nnn]`` (`str`),
-                number of seconds ``123.45`` (`float`), or number of frames ``200`` (`int`).
-            end_time: Starting point in video, in the form of a timecode ``HH:MM:SS[.nnn]`` (`str`),
-                number of seconds ``123.45`` (`float`), or number of frames ``200`` (`int`).
-            start_in_scene: Assume the video begins in a scene. This means that when detecting
-                fast cuts with `ContentDetector`, if no cuts are found, the resulting scene list
-                will contain a single scene spanning the entire video (instead of no scenes).
-                When detecting fades with `ThresholdDetector`, the beginning portion of the video
-                will always be included until the first fade-out event is detected.
-
-        Returns:
-            List of scenes as pairs of (start, end) :class:`FrameTimecode` objects.
-
-        Raises:
-            :class:`VideoOpenFailure`: `video_path` could not be opened.
-            :class:`StatsFileCorrupt`: `stats_file_path` is an invalid stats file
-            ValueError: `start_time` or `end_time` are incorrectly formatted.
-            TypeError: `start_time` or `end_time` are invalid types.
-        """
         video = open_video(video_path, backend=backend)
         if start_time is not None:
             start_time = video.base_timecode + start_time
@@ -243,10 +216,55 @@ class FaceProcessor:
         )
         if scene_manager.stats_manager is not None:
             scene_manager.stats_manager.save_to_csv(csv_file=stats_file_path)
-        scene_list = scene_manager.get_scene_list(start_in_scene=start_in_scene)
-        if scene_list == []:
-            scene_list = [(video.base_timecode, video.duration)]
-        return scene_list
+
+        current_scene_list = scene_manager.get_scene_list(start_in_scene=start_in_scene)
+
+        if current_scene_list:
+            # Manually adjust the end of the last scene to be the end of the video
+            # This is necessary because some backends (e.g. pyav) might not set the last scene's end correctly
+            video_for_props = None  # Renamed from video to avoid conflict with the video object used for detection
+            try:
+                # We need to re-open the video or ensure the original video object is seekable and still valid.
+                # For simplicity and to ensure we get accurate duration regardless of prior processing,
+                # we open it again. Note: this assumes `video_path` is accessible here.
+                video_for_props = open_video(
+                    video_path, backend=backend
+                )  # Use `video_path` and `backend` from function args
+                video_duration_frames = video_for_props.duration.get_frames()
+                video_fps = video_for_props.frame_rate
+
+                last_scene_start, last_scene_end = current_scene_list[-1]
+
+                if last_scene_end.get_frames() < video_duration_frames:
+                    print(
+                        f"Adjusting end of last scene from frame {last_scene_end.get_frames()} to {video_duration_frames}"
+                    )
+                    corrected_last_scene_end = FrameTimecode(
+                        timecode=video_duration_frames, fps=video_fps
+                    )
+                    current_scene_list[-1] = (
+                        last_scene_start,
+                        corrected_last_scene_end,
+                    )
+                elif last_scene_end.get_frames() > video_duration_frames:
+                    print(
+                        f"Warning: Last scene end ({last_scene_end.get_frames()}) is beyond video duration ({video_duration_frames}). "
+                        f"Attempting to cap it."
+                    )
+                    corrected_last_scene_end = FrameTimecode(
+                        timecode=video_duration_frames, fps=video_fps
+                    )
+                    current_scene_list[-1] = (
+                        last_scene_start,
+                        corrected_last_scene_end,
+                    )
+
+            except Exception as e:
+                print(
+                    f"Warning: Could not adjust the last scene's end time during detection: {e}"
+                )
+
+        return current_scene_list
 
     def detect_faces(self):
         """Run face detection on all frames"""
@@ -255,16 +273,15 @@ class FaceProcessor:
         detections = []
 
         total_detection_time = 0.0
-        start_time = time.time()
-        threshold = 0.5  # confidence threshold
-        max_size = 1080
+        threshold = 0.6  # confidence threshold
+        max_size = 1920
         resize = 1
 
         pbar = tqdm.tqdm(flist, total=len(flist), desc="Detecting faces")
 
-        from batch_face import RetinaFace
-
-        detector = RetinaFace(gpu_id=0, fp16=True)
+        is_cuda_available = torch.cuda.is_available()
+        gpu_id = 0 if is_cuda_available else -1
+        detector = RetinaFace(gpu_id=gpu_id, fp16=True)
 
         for fidx, fname in enumerate(pbar):
             frame_start_time = time.time()
