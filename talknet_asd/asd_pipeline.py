@@ -86,14 +86,6 @@ def visualization(tracks, scores, args):
                 sys.stderr.write(
                     f"Warning: Invalid frame number {frame_num} in track {tidx}. Max frames: {num_frames}. Skipping this entry.\r\n"
                 )
-    print(f"[DEBUG] visualization: Total frames for visualization: {num_frames}")
-    # Example of checking a specific frame, e.g., frame 1161 as in the user's example
-    if num_frames > 1161:
-        print(f"[DEBUG] visualization: Faces content for frame 1161: {faces[1161]}")
-    if num_frames > 0:
-        print(
-            f"[DEBUG] visualization: Faces content for last frame ({num_frames-1}): {faces[num_frames-1]}"
-        )
 
     vOut = cv2.VideoWriter(
         os.path.join(args.pyavi_path, "video_only.avi"),
@@ -236,7 +228,6 @@ class VideoPreprocessor:
 class FaceProcessor:
     def __init__(self, args):
         self.args = args
-        self.detector_backend: str = args.detector_backend
 
     def scenes_detect(self):
         sceneList = self.custom_detect_scenes(
@@ -306,9 +297,6 @@ class FaceProcessor:
                 last_scene_start, last_scene_end = current_scene_list[-1]
 
                 if last_scene_end.get_frames() < video_duration_frames:
-                    print(
-                        f"Adjusting end of last scene from frame {last_scene_end.get_frames()} to {video_duration_frames}"
-                    )
                     corrected_last_scene_end = FrameTimecode(
                         timecode=video_duration_frames, fps=video_fps
                     )
@@ -317,10 +305,6 @@ class FaceProcessor:
                         corrected_last_scene_end,
                     )
                 elif last_scene_end.get_frames() > video_duration_frames:
-                    print(
-                        f"Warning: Last scene end ({last_scene_end.get_frames()}) is beyond video duration ({video_duration_frames}). "
-                        f"Attempting to cap it."
-                    )
                     corrected_last_scene_end = FrameTimecode(
                         timecode=video_duration_frames, fps=video_fps
                     )
@@ -343,10 +327,16 @@ class FaceProcessor:
         threshold = 0.6
         max_size = 1920
         resize = 1
-
-        is_cuda_available = torch.cuda.is_available()
-        gpu_id = 0 if is_cuda_available else -1
-        detector = RetinaFace(gpu_id=gpu_id, fp16=True)
+        if self.args.device == "cuda":
+            gpu_id = 0 if torch.cuda.is_available() else -1
+        elif self.args.device == "cpu":
+            gpu_id = -1
+        elif self.args.device == "auto":
+            gpu_id = 0 if torch.cuda.is_available() else -1
+        else:
+            gpu_id = -1
+        fp16_enabled = True if self.args.dtype == "float16" else False
+        detector = RetinaFace(gpu_id=gpu_id, fp16=fp16_enabled)
 
         cap = cv2.VideoCapture(self.args.video_file_path)
         if not cap.isOpened():
@@ -461,14 +451,7 @@ class FaceProcessor:
 
     def track_faces(self, scenes, face_detections):
         all_tracks = []
-        print(f"[DEBUG] track_faces: Input scenes: {scenes}")
-        print(
-            f"[DEBUG] track_faces: Input face_detections length: {len(face_detections)}"
-        )
         for i, shot in enumerate(scenes):
-            print(
-                f"[DEBUG] track_faces: Processing shot {i}: Start frame {shot[0].frame_num}, End frame {shot[1].frame_num}"
-            )
             if (
                 shot[1].frame_num - shot[0].frame_num >= self.args.min_track
             ):  # Discard the shot frames less than min_track frames
@@ -486,28 +469,6 @@ class FaceProcessor:
                 current_shot_detections_for_track_shot = copy.deepcopy(
                     current_shot_detections_segment
                 )
-
-                actual_last_frame_in_segment = (
-                    shot[1].frame_num - 1
-                    if shot[1].frame_num > shot[0].frame_num
-                    else shot[0].frame_num
-                )
-                print(
-                    f"[DEBUG] track_faces: Detections for shot {i} (frames {shot[0].frame_num}-{actual_last_frame_in_segment}): Count = {len(current_shot_detections_for_track_shot)}"
-                )
-                # Debug print for the content of the actual last frame of the scene, if valid
-                if (
-                    actual_last_frame_in_segment >= 0
-                    and actual_last_frame_in_segment < len(face_detections)
-                ):
-                    print(
-                        f"[DEBUG] track_faces: Detections for actual last frame of current scene ({actual_last_frame_in_segment}): {face_detections[actual_last_frame_in_segment]}"
-                    )
-                else:
-                    # This case might occur if shot[1].frame_num <= shot[0].frame_num, which shouldn't happen for valid scenes from scenedetect.
-                    print(
-                        f"[DEBUG] track_faces: No valid actual last frame index for shot {i} (start: {shot[0].frame_num}, exclusive end: {shot[1].frame_num}) to log from face_detections."
-                    )
 
                 shot_tracks = self.track_shot(
                     current_shot_detections_for_track_shot  # Pass the deepcopied segment
@@ -534,24 +495,13 @@ class FaceProcessor:
     def track_shot(self, sceneFaces):
         iouThres = 0.5  # Minimum IOU between consecutive face detections
         tracks = []
-        print(f"[DEBUG] track_shot: Input sceneFaces length: {len(sceneFaces)}")
-        if sceneFaces:
-            print(
-                f"[DEBUG] track_shot: First frame in sceneFaces (frame {sceneFaces[0][0]['frame' ]if sceneFaces[0] else 'N/A'}): {sceneFaces[0]}"
-            )
-            print(
-                f"[DEBUG] track_shot: Last frame in sceneFaces (frame {sceneFaces[-1][0]['frame'] if sceneFaces[-1] else 'N/A'}): {sceneFaces[-1]}"
-            )
-
         while True:
             track = []
             for i, frameFaces in enumerate(sceneFaces):
-                # print(f"[DEBUG] track_shot: Processing frame {i} within scene. Num faces: {len(frameFaces)}")
                 for face in frameFaces:
                     if track == []:
                         track.append(face)
                         frameFaces.remove(face)
-                        # print(f"[DEBUG] track_shot: Started new track with face: {face}")
                     elif face["frame"] - track[-1]["frame"] <= self.args.num_failed_det:
                         iou = self.bb_intersection_over_union(
                             face["bbox"], track[-1]["bbox"]
@@ -559,18 +509,12 @@ class FaceProcessor:
                         if iou > iouThres:
                             track.append(face)
                             frameFaces.remove(face)
-                            # print(f"[DEBUG] track_shot: Added face to track: {face}, IOU: {iou}")
                             continue
                     else:
-                        # print(f"[DEBUG] track_shot: Face skipped, condition not met: face_frame={face[\"frame\"]}, track_last_frame={track[-1][\"frame\"]}, num_failed_det={self.args.num_failed_det}")
                         break
             if track == []:
-                # print("[DEBUG] track_shot: No more faces to form a track.")
                 break
             elif len(track) > self.args.min_track:
-                print(
-                    f"[DEBUG] track_shot: Track created with {len(track)} faces. Frames {track[0]['frame']} to {track[-1]['frame']}"
-                )
                 frameNum = numpy.array([f["frame"] for f in track])
                 bboxes = numpy.array([numpy.array(f["bbox"]) for f in track])
                 frameI = numpy.arange(frameNum[0], frameNum[-1] + 1)
@@ -601,10 +545,6 @@ class FaceProcessor:
                             "confidence": confidencesI,
                         }
                     )
-                    print(
-                        f"[DEBUG] track_shot: Track appended. Interpolated frames: {frameI[0]} to {frameI[-1]}, Total: {len(frameI)}"
-                    )
-        print(f"[DEBUG] track_shot: Total tracks created for this shot: {len(tracks)}")
         return tracks
 
     @staticmethod
@@ -653,11 +593,6 @@ class FaceProcessor:
     def crop_video(self, main_video_cap, track, cropFile):
         self.args.audio_file_path = os.path.join(self.args.pyavi_path, "audio.wav")
 
-        print(f"[DEBUG] crop_video: Processing track for cropFile {cropFile}")
-        print(
-            f"[DEBUG] crop_video: Track details - Frames: {track['frame'][0]} to {track['frame'][-1]}, Length: {len(track['frame'])}"
-        )
-
         vOut = cv2.VideoWriter(
             cropFile + "t.avi", cv2.VideoWriter_fourcc(*"XVID"), 25, (224, 224)
         )  # Write video
@@ -671,9 +606,6 @@ class FaceProcessor:
         dets["y"] = signal.medfilt(dets["y"], kernel_size=13)
 
         original_frames_to_crop = track["frame"]
-        print(
-            f"[DEBUG] crop_video: Original frames to crop: {original_frames_to_crop[0]} to {original_frames_to_crop[-1]}, Count: {len(original_frames_to_crop)}"
-        )
 
         for fidx_in_track, original_frame_num in enumerate(original_frames_to_crop):
             # Seek to the specific frame in the main video
@@ -892,10 +824,6 @@ class ActiveSpeakerDetector:
                 video_feature_raw.shape[2] if num_video_frames_raw > 0 else 112
             )
 
-            print(
-                f"[DEBUG] evaluate_network: {file_name} - Raw Audio MFCCs: {audio_feature_raw.shape}, Raw Video Frames: {video_feature_raw.shape}"
-            )
-
             if num_video_frames_raw == 0:
                 print(
                     f"[WARN] evaluate_network: {file_name} - No video frames found. Appending empty scores array."
@@ -929,13 +857,6 @@ class ActiveSpeakerDetector:
                 num_target_video_frames_for_model,
                 video_frame_h,
                 video_frame_w,
-            )
-
-            print(
-                f"[DEBUG] evaluate_network: {file_name} - Target model chunks: {target_model_chunks}"
-            )
-            print(
-                f"[DEBUG] evaluate_network: {file_name} - Audio for model: {audio_feature_for_model.shape}, Video for model: {video_feature_for_model.shape}"
             )
 
             current_processing_length_seconds = target_model_chunks * 0.04
@@ -1090,9 +1011,6 @@ class ActiveSpeakerDetector:
             # If computed_model_scores.size is 0, final_scores_this_file remains all zeros (num_video_frames_raw long)
 
             all_scores.append(final_scores_this_file)
-            print(
-                f"[DEBUG] evaluate_network: {file_name} - Final scores (len {len(final_scores_this_file)}, first 5): {final_scores_this_file[:5]}"
-            )
 
         print(time.strftime("%Y-%m-%d %H:%M:%S") + " Scores extracted")
         return all_scores
@@ -1113,10 +1031,9 @@ class Pipeline:
         num_failed_det: int = 10,
         min_face_size: int = 1,
         crop_scale: float = 0.40,
-        device: Literal["auto", "cpu", "cuda", "mps"] = "auto",
-        detector_backend: str = "yolov8",
+        device: Literal["auto", "cpu", "cuda"] = "auto",
         scene_detector_backend: Literal["opencv", "pyav"] = "opencv",
-        dtype: Literal["float32", "float16", "bfloat16"] = "float32",
+        dtype: Literal["float32", "float16"] = "float16",
         face_detection_avg_time_threshold: float = 1.0,
         face_detection_min_frames_for_avg: int = 10,
         enable_skip_slow_face_detection: bool = False,
@@ -1126,9 +1043,7 @@ class Pipeline:
         self.dtype = {
             "float32": torch.float32,
             "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
         }[dtype]
-        self.detector_backend: str = detector_backend
         self.scene_detector_backend: str = scene_detector_backend
 
         self.video_path = video_path
