@@ -283,29 +283,28 @@ class FaceProcessor:
                 if isinstance(faces, list) and len(faces) > 0:
                     for face in faces:
                         facial_area = face["box"]
+                        if face.get("score", 0) < threshold:
+                            continue
                         if isinstance(facial_area, dict):
                             if not all(
                                 key in facial_area for key in ["x", "y", "w", "h"]
                             ):
                                 continue
 
-                            x = facial_area["x"]
-                            y = facial_area["y"]
-                            w = facial_area["w"]
-                            h = facial_area["h"]
+                            x1 = facial_area["x"]
+                            y1 = facial_area["y"]
+                            x2 = facial_area["x"] + facial_area["w"]
+                            y2 = facial_area["y"] + facial_area["h"]
                         else:
-                            x = facial_area[0]
-                            y = facial_area[1]
-                            w = facial_area[2]
-                            h = facial_area[3]
+                            x1 = facial_area[0]
+                            y1 = facial_area[1]
+                            x2 = facial_area[2]
+                            y2 = facial_area[3]
 
-                        if face.get("score", 0) < threshold:
+                        if x2 - x1 <= 0 or y2 - y1 <= 0:
                             continue
 
-                        if w <= 0 or h <= 0:
-                            continue
-
-                        bbox = [x, y, x + w, y + h]
+                        bbox = [x1, y1, x2, y2]
 
                         frame_detections.append(
                             {"frame": fidx, "bbox": bbox, "conf": face["score"]}
