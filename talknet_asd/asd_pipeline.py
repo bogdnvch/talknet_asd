@@ -1001,7 +1001,7 @@ class FaceProcessor:
                     audioTmp,
                 )
             )
-            subprocess.call(command, shell=True, stdout=None)  # Crop audio file
+            subprocess.call(command, shell=True, stdout=None)
             _, audio = wavfile.read(audioTmp)
             command = (
                 "ffmpeg -y -i %st.avi -i %s -threads %d -c:v copy -c:a copy %s.avi -loglevel panic"
@@ -1009,9 +1009,6 @@ class FaceProcessor:
             )  # Combine audio and video file
             subprocess.call(command, shell=True, stdout=None)
             os.remove(cropFile + "t.avi")
-            # Ensure audioTmp is removed if it exists
-            if os.path.exists(audioTmp):
-                os.remove(audioTmp)
             return {"track": track, "proc_track": dets}
         finally:
             main_video_cap.release()
