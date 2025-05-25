@@ -473,8 +473,13 @@ class FaceProcessor:
                 shot[1].frame_num - shot[0].frame_num >= self.args.min_track
             ):  # Discard the shot frames less than min_track frames
                 # Original slice, used for debug prints or if original needed before copy
+                # shot[1].frame_num is an EXCLUSIVE end frame index.
+                # The actual frames for the scene are shot[0].frame_num to shot[1].frame_num - 1.
+                # So, the slice should go up to shot[1].frame_num (exclusive end for slice).
                 current_shot_detections_segment = face_detections[
-                    shot[0].frame_num : shot[1].frame_num + 1
+                    shot[0].frame_num : shot[
+                        1
+                    ].frame_num  # Corrected slice
                 ]
 
                 # Create a deepcopy of the segment for track_shot to prevent modifying shared lists
@@ -482,18 +487,26 @@ class FaceProcessor:
                     current_shot_detections_segment
                 )
 
-                print(
-                    f"[DEBUG] track_faces: Detections for shot {i} (frames {shot[0].frame_num}-{shot[1].frame_num}): Count = {len(current_shot_detections_for_track_shot)}"
+                actual_last_frame_in_segment = (
+                    shot[1].frame_num - 1
+                    if shot[1].frame_num > shot[0].frame_num
+                    else shot[0].frame_num
                 )
-                if shot[1].frame_num < len(
-                    face_detections
-                ):  # This debug log should refer to original face_detections
+                print(
+                    f"[DEBUG] track_faces: Detections for shot {i} (frames {shot[0].frame_num}-{actual_last_frame_in_segment}): Count = {len(current_shot_detections_for_track_shot)}"
+                )
+                # Debug print for the content of the actual last frame of the scene, if valid
+                if (
+                    actual_last_frame_in_segment >= 0
+                    and actual_last_frame_in_segment < len(face_detections)
+                ):
                     print(
-                        f"[DEBUG] track_faces: Last frame detections for shot {i} (frame {shot[1].frame_num}): {face_detections[shot[1].frame_num]}"
+                        f"[DEBUG] track_faces: Detections for actual last frame of current scene ({actual_last_frame_in_segment}): {face_detections[actual_last_frame_in_segment]}"
                     )
                 else:
+                    # This case might occur if shot[1].frame_num <= shot[0].frame_num, which shouldn't happen for valid scenes from scenedetect.
                     print(
-                        f"[DEBUG] track_faces: Last frame index {shot[1].frame_num} is out of bounds for face_detections (len {len(face_detections)})"
+                        f"[DEBUG] track_faces: No valid actual last frame index for shot {i} (start: {shot[0].frame_num}, exclusive end: {shot[1].frame_num}) to log from face_detections."
                     )
 
                 shot_tracks = self.track_shot(
