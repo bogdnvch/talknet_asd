@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 from typing import Literal, Optional, Union
 from datetime import datetime
+import copy
 
 import torch
 import numpy
@@ -466,15 +467,20 @@ class FaceProcessor:
             if (
                 shot[1].frame_num - shot[0].frame_num >= self.args.min_track
             ):  # Discard the shot frames less than min_track frames
-                current_shot_detections = face_detections[shot[0].frame_num : shot[1].frame_num + 1]
-                print(f"[DEBUG] track_faces: Detections for shot {i} (frames {shot[0].frame_num}-{shot[1].frame_num}): Count = {len(current_shot_detections)}")
-                if shot[1].frame_num < len(face_detections):
+                # Original slice, used for debug prints or if original needed before copy
+                current_shot_detections_segment = face_detections[shot[0].frame_num : shot[1].frame_num + 1]
+                
+                # Create a deepcopy of the segment for track_shot to prevent modifying shared lists
+                current_shot_detections_for_track_shot = copy.deepcopy(current_shot_detections_segment)
+
+                print(f"[DEBUG] track_faces: Detections for shot {i} (frames {shot[0].frame_num}-{shot[1].frame_num}): Count = {len(current_shot_detections_for_track_shot)}")
+                if shot[1].frame_num < len(face_detections): # This debug log should refer to original face_detections
                     print(f"[DEBUG] track_faces: Last frame detections for shot {i} (frame {shot[1].frame_num}): {face_detections[shot[1].frame_num]}")
                 else:
                     print(f"[DEBUG] track_faces: Last frame index {shot[1].frame_num} is out of bounds for face_detections (len {len(face_detections)})")
 
                 shot_tracks = self.track_shot(
-                       current_shot_detections
+                       current_shot_detections_for_track_shot # Pass the deepcopied segment
                     )
                 print(f"[DEBUG] track_faces: Tracks generated for shot {i}: {len(shot_tracks)}")
                 if shot_tracks:
