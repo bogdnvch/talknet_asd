@@ -347,21 +347,12 @@ class FaceProcessor:
         max_size = self.args.face_detection_max_size
         batch_size = self.args.face_detection_batch_size
 
-        if self.args.device == "cuda":
-            gpu_id = 0 if torch.cuda.is_available() else -1
-        elif self.args.device == "cpu":
-            gpu_id = -1
-        elif self.args.device == "auto":
-            gpu_id = 0 if torch.cuda.is_available() else -1
-        else:
-            gpu_id = -1
+        gpu_id = 0 if self.args.device == torch.device("cuda") else -1
         fp16_enabled = True if self.args.dtype == "float16" else False
-        # Detector initialization should be outside the threaded function if it's not thread-safe
-        # or if we want one instance. RetinaFace is likely okay, but good to be mindful.
-        # For now, assuming detector can be called from main thread with batches prepared by loader.
         detector_instance = RetinaFace(gpu_id=gpu_id, fp16=fp16_enabled)
         print(f"Detector instance device: {detector_instance.device}")
-        if "cuda" in str(detector_instance.device):
+        print(f"Detector instance model dtype: fp16={detector_instance.fp16}")
+        if self.args.device == torch.device("cuda"):
             detector_instance.model.compile(mode="reduce-overhead", fullgraph=True)
 
         frame_queue = queue.Queue(
