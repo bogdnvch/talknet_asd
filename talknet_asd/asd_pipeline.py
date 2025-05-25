@@ -852,7 +852,7 @@ class FaceProcessor:
         interArea = max(0, xB - xA) * max(0, yB - yA)
         boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
         boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-        if evalCol is True:
+        if evalCol == True:
             iou = interArea / float(boxAArea)
         else:
             iou = interArea / float(boxAArea + boxBArea - interArea)
@@ -860,82 +860,111 @@ class FaceProcessor:
 
     def video_tracks(self, all_tracks):
         video_tracks = []
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.args.n_data_loader_thread
+        # main_video_cap = cv2.VideoCapture(self.args.video_file_path) # Removed: Each worker opens its own
+
+        # if not main_video_cap.isOpened(): # Removed
+        #     sys.stderr.write( # Removed
+        #         f"Error: Could not open video file {self.args.video_file_path} in video_tracks method.\\r\\n" # Removed
+        #     ) # Removed
+        #     return [] # Removed
+
+        # try: # Removed
+        # for ii, track in tqdm.tqdm( # Removed
+        #     enumerate(all_tracks), total=len(all_tracks), desc="Cropping tracks" # Removed
+        # ): # Removed
+        #     video_tracks.append( # Removed
+        #         self.crop_video( # Removed
+        #             main_video_cap, # Removed
+        #             track, # Removed
+        #             os.path.join(self.args.pycrop_path, f"{ii:05d}"), # Removed
+        #         ) # Removed
+        #     ) # Removed
+        # finally: # Removed
+        # main_video_cap.release()  # Ensure the video capture is released # Removed
+
+        # New parallel processing logic
+        tasks = []
+        # Use a reasonable number of workers, os.cpu_count() can be a good default
+        # Or self.args.n_data_loader_thread if it's meant for CPU-bound tasks too.
+        # Let's assume n_data_loader_thread is a general indicator of available parallelism.
+        num_workers = min(os.cpu_count() or 1, self.args.n_data_loader_thread)
+
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=num_workers
         ) as executor:
-            futures = [
-                executor.submit(
-                    self.crop_video,
-                    track,
-                    os.path.join(self.args.pycrop_path, f"{ii:05d}"),
+            for ii, track_item in enumerate(all_tracks):
+                crop_file_prefix = os.path.join(self.args.pycrop_path, f"{ii:05d}")
+                # Pass the track item, crop_file_prefix, and the args object (Pipeline instance)
+                future = executor.submit(
+                    FaceProcessor._crop_video_worker_static,
+                    track_item,
+                    crop_file_prefix,
+                    self.args,
                 )
-                for ii, track in enumerate(all_tracks)
-            ]
+                tasks.append(future)
+
             for future in tqdm.tqdm(
-                concurrent.futures.as_completed(futures),
-                total=len(futures),
-                desc="Cropping tracks",
+                concurrent.futures.as_completed(tasks),
+                total=len(tasks),
+                desc="Cropping tracks (Parallel)",
             ):
-                result = future.result()
-                if result is not None:
-                    video_tracks.append(result)
+                try:
+                    result = future.result()
+                    if result:  # Check if worker returned a valid result
+                        video_tracks.append(result)
+                except Exception as e:
+                    sys.stderr.write(f"Error processing a track in parallel: {e}\\r\\n")
 
         print(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} Face Crop completed")
 
         return video_tracks
 
-    def crop_video(self, track, cropFile):
-        # self.args.audio_file_path is already set correctly in __init__ or other methods if needed globally
-        # For this function, we specifically need the main audio path for ffmpeg,
-        # which is self.args.audio_file_path (e.g., .../pyavi/audio.wav)
+    @staticmethod
+    def _crop_video_worker_static(track, cropFile, pipeline_args):
+        # pipeline_args is the instance of the Pipeline class, containing all necessary configurations
+        # main_video_cap is no longer passed; this worker opens its own.
 
-        main_video_cap = cv2.VideoCapture(self.args.video_file_path)
-        if not main_video_cap.isOpened():
+        video_capture = cv2.VideoCapture(pipeline_args.video_file_path)
+        if not video_capture.isOpened():
             sys.stderr.write(
-                f"Error: Could not open video file {self.args.video_file_path} in crop_video for track corresponding to {cropFile}.\r\n"
+                f"Error (_crop_video_worker_static): Could not open video file {pipeline_args.video_file_path} for track cropFile {cropFile}.\\r\\n"
             )
-            # Return a structure indicating failure or an empty result,
-            # consistent with what video_tracks expects or can handle.
-            # For now, returning None, this might need adjustment based on how video_tracks uses the result.
-            return None
+            return None  # Indicate failure
 
         try:
+            # Video writing setup
             vOut = cv2.VideoWriter(
                 cropFile + "t.avi", cv2.VideoWriter_fourcc(*"XVID"), 25, (224, 224)
-            )  # Write video
+            )
             dets = {"x": [], "y": [], "s": []}
-            for det in track["bbox"]:  # Read the tracks
+            for det in track["bbox"]:
                 dets["s"].append(max((det[3] - det[1]), (det[2] - det[0])) / 2)
-                dets["y"].append((det[1] + det[3]) / 2)  # crop center x
-                dets["x"].append((det[0] + det[2]) / 2)  # crop center y
-            dets["s"] = signal.medfilt(dets["s"], kernel_size=13)  # Smooth detections
+                dets["y"].append((det[1] + det[3]) / 2)
+                dets["x"].append((det[0] + det[2]) / 2)
+
+            dets["s"] = signal.medfilt(dets["s"], kernel_size=13)
             dets["x"] = signal.medfilt(dets["x"], kernel_size=13)
             dets["y"] = signal.medfilt(dets["y"], kernel_size=13)
 
             original_frames_to_crop = track["frame"]
 
             for fidx_in_track, original_frame_num in enumerate(original_frames_to_crop):
-                # Seek to the specific frame in the main video
-                main_video_cap.set(cv2.CAP_PROP_POS_FRAMES, original_frame_num)
-                ret, image = main_video_cap.read()
+                video_capture.set(cv2.CAP_PROP_POS_FRAMES, original_frame_num)
+                ret, image = video_capture.read()
 
                 if not ret:
                     sys.stderr.write(
-                        f"Warning: Could not read frame {original_frame_num} (index {fidx_in_track} in track) from {self.args.video_file_path} during crop_video. Skipping frame.\\r\\n"
+                        f"Warning (_crop_video_worker_static): Could not read frame {original_frame_num} (index {fidx_in_track} in track) from {pipeline_args.video_file_path} for cropFile {cropFile}. Skipping frame.\\r\\n"
                     )
-                    continue  # Skip this frame if not readable
+                    continue
 
-                cs = self.args.crop_scale
-                bs = dets["s"][
-                    fidx_in_track
-                ]  # Detection box size, use fidx_in_track for dets
-                bsi = int(bs * (1 + 2 * cs))  # Pad videos by this amount
+                cs = pipeline_args.crop_scale
+                bs = dets["s"][fidx_in_track]
+                bsi = int(bs * (1 + 2 * cs))
 
-                # Pad the image correctly
-                # Ensure image is not None before padding
                 if image is None:
                     sys.stderr.write(
-                        f"Warning: Image for frame {original_frame_num} is None before padding. Skipping frame.\\r\\n"
+                        f"Warning (_crop_video_worker_static): Image for frame {original_frame_num} is None before padding for cropFile {cropFile}. Skipping frame.\\r\\n"
                     )
                     continue
 
@@ -943,15 +972,11 @@ class FaceProcessor:
                     image,
                     ((bsi, bsi), (bsi, bsi), (0, 0)),
                     "constant",
-                    constant_values=(
-                        110,
-                        110,
-                    ),  # Using default padding color from original code
+                    constant_values=(110, 110),
                 )
-                my = dets["y"][fidx_in_track] + bsi  # BBox center Y
-                mx = dets["x"][fidx_in_track] + bsi  # BBox center X
+                my = dets["y"][fidx_in_track] + bsi
+                mx = dets["x"][fidx_in_track] + bsi
 
-                # Ensure cropping indices are valid
                 y_start, y_end = int(my - bs), int(my + bs * (1 + 2 * cs))
                 x_start, x_end = int(mx - bs * (1 + cs)), int(mx + bs * (1 + cs))
 
@@ -964,54 +989,101 @@ class FaceProcessor:
                     and x_end <= padded_image.shape[1]
                 ):
                     sys.stderr.write(
-                        f"Warning: Invalid crop dimensions for frame {original_frame_num}. Skipping frame. \
-                        y_start={y_start}, y_end={y_end}, x_start={x_start}, x_end={x_end}, padded_shape={padded_image.shape}\\r\\n"
+                        f"Warning (_crop_video_worker_static): Invalid crop dimensions for frame {original_frame_num} for cropFile {cropFile}. Skipping frame. "
+                        f"y_start={y_start}, y_end={y_end}, x_start={x_start}, x_end={x_end}, padded_shape={padded_image.shape}\\r\\n"
                     )
                     continue
 
-                face = padded_image[
-                    y_start:y_end,
-                    x_start:x_end,
-                ]
+                face = padded_image[y_start:y_end, x_start:x_end]
 
                 if face.size == 0:
                     sys.stderr.write(
-                        f"Warning: Cropped face for frame {original_frame_num} is empty. Skipping frame.\\r\\n"
+                        f"Warning (_crop_video_worker_static): Cropped face for frame {original_frame_num} for cropFile {cropFile} is empty. Skipping frame.\\r\\n"
                     )
                     continue
 
                 vOut.write(cv2.resize(face, (224, 224)))
 
+            vOut.release()  # Release video writer for "t.avi"
+
+            # Audio processing
             audioTmp = cropFile + ".wav"
-            # Use the first and last original frame numbers for audio start/end times
-            audioStart = (
-                (original_frames_to_crop[0]) / 25.0
-            )  # Assuming 25 FPS for audio sync
-            audioEnd = (
-                original_frames_to_crop[-1] + 1
-            ) / 25.0  # +1 to include the last frame's duration
-            vOut.release()
-            command = (
+            # pipeline_args.audio_file_path should be the path to the main audio.wav
+            # (e.g., os.path.join(pipeline_args.pyavi_path, "audio.wav"))
+            # This path is set in VideoPreprocessor.extract_audio and stored on the pipeline_args (self.args) object.
+
+            if (
+                not original_frames_to_crop.size
+            ):  # Handle empty tracks if they somehow get here
+                sys.stderr.write(
+                    f"Warning (_crop_video_worker_static): Track for cropFile {cropFile} has no frames. Skipping audio extraction.\\r\\n"
+                )
+                # Clean up temporary video file if created
+                if os.path.exists(cropFile + "t.avi"):
+                    os.remove(cropFile + "t.avi")
+                return None
+
+            audioStart = original_frames_to_crop[0] / 25.0
+            audioEnd = (original_frames_to_crop[-1] + 1) / 25.0
+
+            command_audio = (
                 "ffmpeg -y -i %s -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 -threads %d -ss %.3f -to %.3f %s -loglevel panic"
                 % (
-                    self.args.audio_file_path,  # This should be the path to the full audio extracted from the original video
-                    self.args.n_data_loader_thread,
+                    pipeline_args.audio_file_path,  # This should be the full audio extracted from the original video
+                    pipeline_args.n_data_loader_thread,
                     audioStart,
                     audioEnd,
                     audioTmp,
                 )
             )
-            subprocess.call(command, shell=True, stdout=None)
-            _, audio = wavfile.read(audioTmp)
-            command = (
+            subprocess.call(command_audio, shell=True, stdout=None)
+
+            # Combine audio and video
+            # Check if temp audio and video files were created before combining
+            if not os.path.exists(cropFile + "t.avi") or not os.path.exists(audioTmp):
+                sys.stderr.write(
+                    f"Error (_crop_video_worker_static): Temporary video or audio missing for {cropFile}. Cannot combine.\\r\\n"
+                )
+                if os.path.exists(cropFile + "t.avi"):
+                    os.remove(cropFile + "t.avi")
+                if os.path.exists(audioTmp):
+                    os.remove(audioTmp)
+                return None
+
+            command_combine = (
                 "ffmpeg -y -i %st.avi -i %s -threads %d -c:v copy -c:a copy %s.avi -loglevel panic"
-                % (cropFile, audioTmp, self.args.n_data_loader_thread, cropFile)
-            )  # Combine audio and video file
-            subprocess.call(command, shell=True, stdout=None)
-            os.remove(cropFile + "t.avi")
+                % (cropFile, audioTmp, pipeline_args.n_data_loader_thread, cropFile)
+            )
+            subprocess.call(command_combine, shell=True, stdout=None)
+
+            # Cleanup temporary files
+            if os.path.exists(cropFile + "t.avi"):
+                os.remove(cropFile + "t.avi")
+            # audioTmp (.wav) is kept as it's used by evaluate_network
+
             return {"track": track, "proc_track": dets}
+
+        except Exception as e:
+            sys.stderr.write(
+                f"Error in _crop_video_worker_static for {cropFile}: {e}\\r\\n"
+            )
+            # Ensure temporary files are cleaned up on error if they exist
+            if os.path.exists(cropFile + "t.avi"):
+                try:
+                    os.remove(cropFile + "t.avi")
+                except OSError:
+                    pass  # Ignore if already gone or permission issues
+            if os.path.exists(
+                cropFile + ".wav"
+            ):  # audioTmp might be created before error
+                try:
+                    os.remove(cropFile + ".wav")
+                except OSError:
+                    pass
+            return None  # Indicate failure
         finally:
-            main_video_cap.release()
+            if video_capture.isOpened():
+                video_capture.release()
 
     def save_results(self, video_tracks):
         save_path = os.path.join(self.args.pywork_path, "tracks.pckl")
