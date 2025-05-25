@@ -473,19 +473,8 @@ class FaceProcessor:
                 shot_tracks = self.track_shot(
                     current_shot_detections_for_track_shot  # Pass the deepcopied segment
                 )
-                print(
-                    f"[DEBUG] track_faces: Tracks generated for shot {i}: {len(shot_tracks)}"
-                )
-                if shot_tracks:
-                    for t_idx, tr in enumerate(shot_tracks):
-                        print(
-                            f"[DEBUG] track_faces: Shot {i}, Track {t_idx}: Frames {tr['frame'][0]} to {tr['frame'][-1]}, Length {len(tr['frame'])}"
-                        )
                 all_tracks.extend(shot_tracks)
-            else:
-                print(
-                    f"[DEBUG] track_faces: Shot {i} (frames {shot[0].frame_num}-{shot[1].frame_num}) discarded as too short."
-                )
+
         sys.stderr.write(
             time.strftime("%Y-%m-%d %H:%M:%S")
             + " Face track and detected %d tracks \r\n" % len(all_tracks)
@@ -782,7 +771,6 @@ class ActiveSpeakerDetector:
             enumerate(files), total=len(files), desc="Evaluating ASD"
         ):
             file_name = os.path.splitext(os.path.basename(file))[0]
-            print(f"[DEBUG] evaluate_network: Processing file {file_name}")
 
             _, audio_samples_raw_data = wavfile.read(
                 os.path.join(self.args.pycrop_path, file_name + ".wav")
