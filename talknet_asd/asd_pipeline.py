@@ -15,6 +15,7 @@ import copy
 import queue
 import threading
 import concurrent.futures
+import multiprocessing
 
 import torch
 import numpy
@@ -1422,6 +1423,21 @@ class Pipeline:
         face_detection_batch_size: int = 32,
         **kwargs,
     ):
+        # Set multiprocessing start method to 'spawn' for CUDA compatibility
+        # This should be done before any CUDA initialization if possible.
+        try:
+            if multiprocessing.get_start_method(allow_none=True) != "spawn":
+                multiprocessing.set_start_method("spawn", force=True)
+        except RuntimeError:
+            # RuntimeError can occur if the context has already been set and force=False,
+            # or if trying to set it after the context has been used.
+            # If it's already 'spawn', we're good. If it's something else and already used,
+            # this might indicate a deeper issue, but 'force=True' attempts to override.
+            print(
+                "Note: Multiprocessing context already set or used. Attempting to force 'spawn'."
+            )
+            # If 'spawn' is critical and this fails, the program might still error later.
+
         self.device = resolve_device(device=device)
         self.dtype = {
             "float32": torch.float32,
