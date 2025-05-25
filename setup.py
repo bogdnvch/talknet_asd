@@ -19,8 +19,6 @@ setup(
         "ffmpeg>=1.4,<2.0",
         "ultralytics>=8.3.117,<8.4.0",
         "huggingface-hub>=0.30.2",
-        "deepface>=0.0.93,<0.0.94",
-        "tf-keras>=2.15.0,<3.0.0",
         "batch-face @ git+https://github.com/elliottzheng/batch-face.git@master",
     ],
     python_requires=">=3.12",
