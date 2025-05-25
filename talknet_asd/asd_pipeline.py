@@ -31,7 +31,7 @@ from scenedetect import (
 
 
 from huggingface_hub import hf_hub_download
-from deepface import DeepFace
+# from deepface import DeepFace
 
 from talknet_asd.talkNet import talkNet
 from talknet_asd.utils.resolve_device import resolve_device
@@ -264,7 +264,7 @@ class FaceProcessor:
 
         from batch_face import RetinaFace
 
-        detector = RetinaFace(gpu_id=0)
+        detector = RetinaFace(gpu_id=0, fp16=True)
 
         for fidx, fname in enumerate(pbar):
             frame_start_time = time.time()
@@ -280,11 +280,6 @@ class FaceProcessor:
                     max_size=max_size,
                     return_dict=True,
                 )
-                # face = faces[0]
-                # box = face['box']
-                # kps = face['kps']
-                # score = face['score']
-
                 if isinstance(faces, list) and len(faces) > 0:
                     for face in faces:
                         facial_area = face["box"]
