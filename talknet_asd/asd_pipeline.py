@@ -83,8 +83,15 @@ def visualization(tracks, scores, args):
                 )
             else:
                 sys.stderr.write(
-                    f"Warning: Invalid frame number {frame_num} in track {tidx}. Max frames: {num_frames}. Skipping this entry.\\r\\n"
+                    f"Warning: Invalid frame number {frame_num} in track {tidx}. Max frames: {num_frames}. Skipping this entry.\r\n"
                 )
+    print(f"[DEBUG] visualization: Total frames for visualization: {num_frames}")
+    # Example of checking a specific frame, e.g., frame 1161 as in the user's example
+    if num_frames > 1161:
+        print(f"[DEBUG] visualization: Faces content for frame 1161: {faces[1161]}")
+    if num_frames > 0:
+        print(f"[DEBUG] visualization: Faces content for last frame ({num_frames-1}): {faces[num_frames-1]}")
+
 
     vOut = cv2.VideoWriter(
         os.path.join(args.pyavi_path, "video_only.avi"),
@@ -452,36 +459,53 @@ class FaceProcessor:
 
     def track_faces(self, scenes, face_detections):
         all_tracks = []
-        for shot in scenes:
+        print(f"[DEBUG] track_faces: Input scenes: {scenes}")
+        print(f"[DEBUG] track_faces: Input face_detections length: {len(face_detections)}")
+        for i, shot in enumerate(scenes):
+            print(f"[DEBUG] track_faces: Processing shot {i}: Start frame {shot[0].frame_num}, End frame {shot[1].frame_num}")
             if (
                 shot[1].frame_num - shot[0].frame_num >= self.args.min_track
             ):  # Discard the shot frames less than min_track frames
-                # Pass scene_end_frame_abs to track_shot
-                scene_end_frame_abs = shot[1].frame_num
-                print(f"TRACK_FACES: Processing shot from {shot[0].frame_num} to {scene_end_frame_abs}")
-                current_scene_detections = face_detections[shot[0].frame_num : scene_end_frame_abs + 1]
-                all_tracks.extend(
-                    self.track_shot(
-                        current_scene_detections,
-                        scene_end_frame_abs
+                current_shot_detections = face_detections[shot[0].frame_num : shot[1].frame_num + 1]
+                print(f"[DEBUG] track_faces: Detections for shot {i} (frames {shot[0].frame_num}-{shot[1].frame_num}): Count = {len(current_shot_detections)}")
+                if shot[1].frame_num < len(face_detections):
+                    print(f"[DEBUG] track_faces: Last frame detections for shot {i} (frame {shot[1].frame_num}): {face_detections[shot[1].frame_num]}")
+                else:
+                    print(f"[DEBUG] track_faces: Last frame index {shot[1].frame_num} is out of bounds for face_detections (len {len(face_detections)})")
+
+                shot_tracks = self.track_shot(
+                       current_shot_detections
                     )
-                )  # 'frames' to present this tracks' timestep, 'bbox' presents the location of the faces
+                print(f"[DEBUG] track_faces: Tracks generated for shot {i}: {len(shot_tracks)}")
+                if shot_tracks:
+                    for t_idx, tr in enumerate(shot_tracks):
+                        print(f"[DEBUG] track_faces: Shot {i}, Track {t_idx}: Frames {tr['frame'][0]} to {tr['frame'][-1]}, Length {len(tr['frame'])}")
+                all_tracks.extend(shot_tracks)
+            else:
+                print(f"[DEBUG] track_faces: Shot {i} (frames {shot[0].frame_num}-{shot[1].frame_num}) discarded as too short.")
         sys.stderr.write(
             time.strftime("%Y-%m-%d %H:%M:%S")
             + " Face track and detected %d tracks \r\n" % len(all_tracks)
         )
         return all_tracks
 
-    def track_shot(self, sceneFaces, scene_end_frame_abs):
+    def track_shot(self, sceneFaces):
         iouThres = 0.5  # Minimum IOU between consecutive face detections
         tracks = []
+        print(f"[DEBUG] track_shot: Input sceneFaces length: {len(sceneFaces)}")
+        if sceneFaces:
+            print(f"[DEBUG] track_shot: First frame in sceneFaces (frame {sceneFaces[0][0]['frame' ]if sceneFaces[0] else 'N/A'}): {sceneFaces[0]}")
+            print(f"[DEBUG] track_shot: Last frame in sceneFaces (frame {sceneFaces[-1][0]['frame'] if sceneFaces[-1] else 'N/A'}): {sceneFaces[-1]}")
+
         while True:
             track = []
-            for frameFaces in sceneFaces:
+            for i, frameFaces in enumerate(sceneFaces):
+                #print(f"[DEBUG] track_shot: Processing frame {i} within scene. Num faces: {len(frameFaces)}")
                 for face in frameFaces:
                     if track == []:
                         track.append(face)
                         frameFaces.remove(face)
+                        #print(f"[DEBUG] track_shot: Started new track with face: {face}")
                     elif face["frame"] - track[-1]["frame"] <= self.args.num_failed_det:
                         iou = self.bb_intersection_over_union(
                             face["bbox"], track[-1]["bbox"]
@@ -489,12 +513,16 @@ class FaceProcessor:
                         if iou > iouThres:
                             track.append(face)
                             frameFaces.remove(face)
+                            #print(f"[DEBUG] track_shot: Added face to track: {face}, IOU: {iou}")
                             continue
                     else:
+                        #print(f"[DEBUG] track_shot: Face skipped, condition not met: face_frame={face[\"frame\"]}, track_last_frame={track[-1][\"frame\"]}, num_failed_det={self.args.num_failed_det}")
                         break
             if track == []:
+                #print("[DEBUG] track_shot: No more faces to form a track.")
                 break
             elif len(track) > self.args.min_track:
+                print(f"[DEBUG] track_shot: Track created with {len(track)} faces. Frames {track[0]['frame']} to {track[-1]['frame']}")
                 frameNum = numpy.array([f["frame"] for f in track])
                 bboxes = numpy.array([numpy.array(f["bbox"]) for f in track])
                 frameI = numpy.arange(frameNum[0], frameNum[-1] + 1)
@@ -518,15 +546,6 @@ class FaceProcessor:
                     )
                     > self.args.min_face_size
                 ):
-                    print(f"TRACK_SHOT: Scene end frame (absolute): {scene_end_frame_abs}")
-                    print(f"TRACK_SHOT: Track original detected frames (absolute): {frameNum[0]} to {frameNum[-1]}")
-                    print(f"TRACK_SHOT: Track interpolated frames (frameI - absolute): {frameI[0]} to {frameI[-1]}")
-                    if frameI[-1] < scene_end_frame_abs:
-                        print(f"TRACK_SHOT: WARNING - Track's last interpolated frame {frameI[-1]} is less than scene end frame {scene_end_frame_abs}.")
-                    elif frameI[-1] > scene_end_frame_abs:
-                        print(f"TRACK_SHOT: WARNING - Track's last interpolated frame {frameI[-1]} is greater than scene end frame {scene_end_frame_abs}.")
-                    else:
-                        print(f"TRACK_SHOT: Track's last interpolated frame {frameI[-1]} matches scene end frame {scene_end_frame_abs}.")
                     tracks.append(
                         {
                             "frame": frameI,
@@ -534,6 +553,8 @@ class FaceProcessor:
                             "confidence": confidencesI,
                         }
                     )
+                    print(f"[DEBUG] track_shot: Track appended. Interpolated frames: {frameI[0]} to {frameI[-1]}, Total: {len(frameI)}")
+        print(f"[DEBUG] track_shot: Total tracks created for this shot: {len(tracks)}")
         return tracks
 
     @staticmethod
@@ -582,6 +603,9 @@ class FaceProcessor:
     def crop_video(self, main_video_cap, track, cropFile):
         self.args.audio_file_path = os.path.join(self.args.pyavi_path, "audio.wav")
 
+        print(f"[DEBUG] crop_video: Processing track for cropFile {cropFile}")
+        print(f"[DEBUG] crop_video: Track details - Frames: {track['frame'][0]} to {track['frame'][-1]}, Length: {len(track['frame'])}")
+
         vOut = cv2.VideoWriter(
             cropFile + "t.avi", cv2.VideoWriter_fourcc(*"XVID"), 25, (224, 224)
         )  # Write video
@@ -595,6 +619,7 @@ class FaceProcessor:
         dets["y"] = signal.medfilt(dets["y"], kernel_size=13)
 
         original_frames_to_crop = track["frame"]
+        print(f"[DEBUG] crop_video: Original frames to crop: {original_frames_to_crop[0]} to {original_frames_to_crop[-1]}, Count: {len(original_frames_to_crop)}")
 
         for fidx_in_track, original_frame_num in enumerate(original_frames_to_crop):
             # Seek to the specific frame in the main video
@@ -715,7 +740,7 @@ class ActiveSpeakerDetector:
         duration_set = {1, 1, 1, 2, 2, 2, 3, 3, 4, 5, 6}
         for file in tqdm.tqdm(files, total=len(files)):
             file_name = os.path.splitext(file.split("/")[-1])[0]  # Load audio and video
-            print(f"EVALUATE_NETWORK: Processing file: {file}")
+            print(f"[DEBUG] evaluate_network: Processing file {file_name}")
             _, audio = wavfile.read(
                 os.path.join(self.args.pycrop_path, file_name + ".wav")
             )
@@ -740,14 +765,15 @@ class ActiveSpeakerDetector:
                     break
             video.release()
             video_feature = numpy.array(video_feature)
+            print(f"[DEBUG] evaluate_network: {file_name} - Audio feature shape: {audio_feature.shape}, Video feature shape: {video_feature.shape}")
             length = min(
                 audio_feature.shape[0] / 100,
                 video_feature.shape[0] / 25,
             )
-            print(f"EVALUATE_NETWORK: File {file_name} - Audio feature shape: {audio_feature.shape}, Video feature shape: {video_feature.shape}")
-            print(f"EVALUATE_NETWORK: File {file_name} - Calculated length (seconds): {length:.2f}")
+            print(f"[DEBUG] evaluate_network: {file_name} - Calculated length: {length}")
             audio_feature = audio_feature[: int(round(length * 100)), :]
             video_feature = video_feature[: int(round(length * 25)), :, :]
+            print(f"[DEBUG] evaluate_network: {file_name} - Trimmed Audio feature shape: {audio_feature.shape}, Trimmed Video feature shape: {video_feature.shape}")
             all_score = []  # Evaluation use TalkNet
             for duration in duration_set:
                 batch_size = int(math.ceil(length / duration))
@@ -786,6 +812,7 @@ class ActiveSpeakerDetector:
             all_score = numpy.round(
                 (numpy.mean(numpy.array(all_score), axis=0)), 1
             ).astype(float)
+            print(f"[DEBUG] evaluate_network: {file_name} - Final scores for this file (first 5): {all_score[:5]}, Length: {len(all_score)}")
             all_scores.append(all_score)
         print(time.strftime("%Y-%m-%d %H:%M:%S") + " Scores extracted")
         return all_scores
