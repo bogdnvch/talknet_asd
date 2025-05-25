@@ -1038,7 +1038,7 @@ class Pipeline:
         face_detection_min_frames_for_avg: int = 10,
         enable_skip_slow_face_detection: bool = False,
         face_detection_threshold: float = 0.6,
-        face_detection_max_size: int = 2560,
+        face_detection_max_size: int = 1920,
         **kwargs,
     ):
         self.device = resolve_device(device=device)
