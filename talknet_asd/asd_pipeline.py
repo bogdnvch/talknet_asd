@@ -360,9 +360,12 @@ class FaceProcessor:
         # or if we want one instance. RetinaFace is likely okay, but good to be mindful.
         # For now, assuming detector can be called from main thread with batches prepared by loader.
         detector_instance = RetinaFace(gpu_id=gpu_id, fp16=fp16_enabled)
+        print(f"Detector instance device: {detector_instance.device}")
+        if "cuda" in str(detector_instance.device):
+            detector_instance.model.compile(mode="reduce-overhead", fullgraph=True)
 
         frame_queue = queue.Queue(
-            maxsize=batch_size * 2
+            maxsize=batch_size * 8
         )  # Queue for (fidx, img_rgb) or None
         loader_exception = None  # To capture exceptions from the loader thread
 
