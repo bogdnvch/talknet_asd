@@ -1096,9 +1096,6 @@ class ActiveSpeakerDetector:
     def __init__(self, args, dtype=torch.float32):
         self.args = args
         self.dtype = dtype
-        self.model = talkNet(device=args.device, dtype=dtype)
-        self.model.loadParameters(args.pretrain_model)
-        self.model.eval()
 
     @staticmethod
     def _pad_audio_features(features, num_target_samples, num_mfcc_channels=13):
@@ -1154,6 +1151,9 @@ class ActiveSpeakerDetector:
         return padded_frames[:num_target_frames, :, :]
 
     def evaluate_network(self):
+        model = talkNet(device=self.args.device, dtype=self.dtype)
+        model.loadParameters(self.args.pretrain_model)
+        model.eval()
         # GPU: active speaker detection by pretrained TalkNet
         files = glob.glob("%s/*.avi" % self.args.pycrop_path)
         files.sort()
@@ -1301,30 +1301,51 @@ class ActiveSpeakerDetector:
                             .to(self.args.device, dtype=self.dtype)
                         )
 
-                        embed_a = self.model.model.forward_audio_frontend(input_a)
-                        embed_v = self.model.model.forward_visual_frontend(input_v)
+                        embed_a = model.model.forward_audio_frontend(input_a)
+                        embed_v = model.model.forward_visual_frontend(input_v)
 
                         if embed_a.size(1) != embed_v.size(1):
                             print(
-                                f"[WARN] evaluate_network: {file_name} - Embed lengths differ (A:{embed_a.size(1)}, V:{embed_v.size(1)}) Duration:{duration}s, Batch:{i}. Truncating."
+                                f"[WARN] evaluate_network: {file_name} - Embed lengths differ (A:{embed_a.size(1)}, V:{embed_v.size(1)}) Duration:{duration}s, Batch:{i}. Padding shorter."
                             )
-                            min_len = min(embed_a.size(1), embed_v.size(1))
-                            embed_a = embed_a[:, :min_len, :]
-                            embed_v = embed_v[:, :min_len, :]
-
-                        if embed_a.size(1) == 0:
+                            if embed_a.size(1) < embed_v.size(1):
+                                # Pad embed_a
+                                diff = embed_v.size(1) - embed_a.size(1)
+                                last_vector_a = embed_a[
+                                    :, -1:, :
+                                ]  # Keep dimensions for cat
+                                padding_a = last_vector_a.repeat(1, diff, 1)
+                                embed_a = torch.cat((embed_a, padding_a), dim=1)
+                            else:
+                                # Pad embed_v
+                                diff = embed_a.size(1) - embed_v.size(1)
+                                last_vector_v = embed_v[
+                                    :, -1:, :
+                                ]  # Keep dimensions for cat
+                                padding_v = last_vector_v.repeat(1, diff, 1)
+                                embed_v = torch.cat((embed_v, padding_v), dim=1)
+                        # Ensure lengths are now equal, otherwise something is wrong
+                        if embed_a.size(1) != embed_v.size(1):
                             print(
-                                f"[WARN] evaluate_network: {file_name} - Zero sequence length for embeddings after potential truncation. Skipping batch."
+                                f"[ERROR] evaluate_network: {file_name} - Embed lengths STILL differ after padding (A:{embed_a.size(1)}, V:{embed_v.size(1)}). Skipping batch."
                             )
                             continue
 
-                        context_a, context_v = self.model.model.forward_cross_attention(
+                        if (
+                            embed_a.size(1) == 0
+                        ):  # Should also check embed_v, but if they are equal, one check is enough
+                            print(
+                                f"[WARN] evaluate_network: {file_name} - Zero sequence length for embeddings after potential padding. Skipping batch."
+                            )
+                            continue
+
+                        context_a, context_v = model.model.forward_cross_attention(
                             embed_a, embed_v
                         )
-                        out = self.model.model.forward_audio_visual_backend(
+                        out = model.model.forward_audio_visual_backend(
                             context_a, context_v
                         )
-                        score_from_model = self.model.lossAV.forward(out, labels=None)
+                        score_from_model = model.lossAV.forward(out, labels=None)
                         scores_for_duration.extend(score_from_model)
 
                 if scores_for_duration:
