@@ -893,7 +893,6 @@ class FaceProcessor:
                 sys.stderr.write(
                     f"Warning: Worker: No frames in track for {crop_file_base}. Skipping track output.\\r\\n"
                 )
-                # No files should be created or left behind for this case by this point
                 return None
 
             main_video_cap = cv2.VideoCapture(video_file_path)
@@ -912,14 +911,16 @@ class FaceProcessor:
                 )
                 return None
 
-            dets = {"x": [], "y": [], "s": []}
-            for det in track["bbox"]:
-                dets["s"].append(max((det[3] - det[1]), (det[2] - det[0])) / 2)
-                dets["y"].append((det[1] + det[3]) / 2)
-                dets["x"].append((det[0] + det[2]) / 2)
-            dets["s"] = signal.medfilt(dets["s"], kernel_size=13)
-            dets["x"] = signal.medfilt(dets["x"], kernel_size=13)
-            dets["y"] = signal.medfilt(dets["y"], kernel_size=13)
+            dets = track["bbox"] # Original bbox data from the track input
+            # The dets returned by the worker (proc_track) will be smoothed and potentially truncated x,y,s values.
+            # For bs calculation within the loop, we use the raw bbox from the input track.
+            # The proc_track construction is separate.
+            
+            smoothed_dets_components = {
+                "x": signal.medfilt(numpy.array([(det[0] + det[2]) / 2 for det in track["bbox"]]), kernel_size=13),
+                "y": signal.medfilt(numpy.array([(det[1] + det[3]) / 2 for det in track["bbox"]]), kernel_size=13),
+                "s": signal.medfilt(numpy.array([max((det[3] - det[1]), (det[2] - det[0])) / 2 for det in track["bbox"]]), kernel_size=13),
+            }
 
             frames_written = 0
             for fidx_in_track, original_frame_num in enumerate(original_frames_to_crop):
@@ -932,23 +933,29 @@ class FaceProcessor:
                     continue
 
                 cs = crop_scale
-                bs = dets["s"][fidx_in_track]
-                bsi = int(bs * (1 + 2 * cs))
+                # Use smoothed components for cropping, ensuring fidx_in_track is valid for these arrays
+                if not (fidx_in_track < len(smoothed_dets_components["s"])):
+                    sys.stderr.write(f"Warning: Worker: fidx_in_track {fidx_in_track} out of bounds for smoothed_dets_components. Skipping frame {original_frame_num}.\\r\\n")
+                    continue
+                bs = smoothed_dets_components["s"][fidx_in_track]
+
                 if image is None:  # Should be caught by 'not ret' but defensive check
                     sys.stderr.write(
                         f"Warning: Worker image for frame {original_frame_num} is None. Skipping frame.\\r\\n"
                     )
                     continue
 
+                bsi = int(bs * (1 + 2 * cs))
                 padded_image = numpy.pad(
                     image,
                     ((bsi, bsi), (bsi, bsi), (0, 0)),
                     "constant",
                     constant_values=(110, 110),
                 )
-                my = dets["y"][fidx_in_track] + bsi
-                mx = dets["x"][fidx_in_track] + bsi
-                y_start, y_end = int(my - bs), int(my + bs * (1 + 2 * cs))
+                my = smoothed_dets_components["y"][fidx_in_track] + bsi
+                mx = smoothed_dets_components["x"][fidx_in_track] + bsi
+                
+                y_start, y_end = int(my - bs), int(my + bs * (1 + 2 * cs)) # bs should be from smoothed_dets_components["s"][fidx_in_track]
                 x_start, x_end = int(mx - bs * (1 + cs)), int(mx + bs * (1 + cs))
 
                 if not (
@@ -972,22 +979,45 @@ class FaceProcessor:
                     continue
                 vOut.write(cv2.resize(face, (224, 224)))
                 frames_written += 1
-
+            
             vOut.release()  # Release the temporary video file
             vOut = None  # Mark as released
 
             if frames_written == 0:
-                sys.stderr.write(
-                    f"Warning: Worker: No frames were actually written to {temp_video_file} for {crop_file_base}. Skipping track.\\r\\n"
-                )
-                FaceProcessor._cleanup_worker_files(
-                    temp_video_file, None, None
-                )  # Only temp_video exists
+                sys.stderr.write(f"Warning: Worker: No frames were actually written to {temp_video_file} for {crop_file_base}. Skipping track output.\\r\\n")
+                FaceProcessor._cleanup_worker_files(temp_video_file, None, None)
                 return None
 
-            # Audio extraction
-            audio_start = original_frames_to_crop[0] / 25.0
-            audio_end = (original_frames_to_crop[-1] + 1) / 25.0
+            # Prepare output track and dets data, adjusted for frames_written
+            output_track_data = copy.deepcopy(track)
+            output_proc_track_data = {}
+
+            if frames_written < len(original_frames_to_crop):
+                sys.stderr.write(
+                    f"Warning: Worker: Only {frames_written}/{len(original_frames_to_crop)} frames written for {crop_file_base}. "
+                    f"Adjusting track data to match actual frames written.\\r\\n"
+                )
+                output_track_data["frame"] = track["frame"][:frames_written]
+                output_track_data["bbox"] = track["bbox"][:frames_written]
+                if "confidence" in output_track_data: 
+                    output_track_data["confidence"] = track["confidence"][:frames_written]
+            # Else, frames_written == len(original_frames_to_crop), so track data is already correct.
+
+            # Populate proc_track with smoothed and potentially truncated components
+            output_proc_track_data["x"] = smoothed_dets_components["x"][:frames_written]
+            output_proc_track_data["y"] = smoothed_dets_components["y"][:frames_written]
+            output_proc_track_data["s"] = smoothed_dets_components["s"][:frames_written]
+
+            # Audio extraction should use the duration of *actual* frames written
+            # which corresponds to the length of output_track_data["frame"]
+            if not output_track_data["frame"].size:
+                 sys.stderr.write(f"Error: Worker: output_track_data[\"frame\"] is empty for {crop_file_base} after adjustments. Skipping track.\\r\\n")
+                 FaceProcessor._cleanup_worker_files(temp_video_file, None, None) 
+                 return None
+
+            audio_start = output_track_data["frame"][0] / 25.0
+            audio_end = (output_track_data["frame"][-1] + 1) / 25.0
+            
             command_audio = (
                 f'ffmpeg -y -i "{audio_file_path_orig}" -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 '
                 f'-threads {n_data_loader_thread} -ss {audio_start:.3f} -to {audio_end:.3f} "{audio_temp_file}" -loglevel error'
@@ -999,12 +1029,9 @@ class FaceProcessor:
                 sys.stderr.write(
                     f"Error: ffmpeg audio extraction failed for {crop_file_base} (retcode {ret_audio.returncode}).\\nCmd: {command_audio}\\nError: {ret_audio.stderr.strip()}\\r\\n"
                 )
-                FaceProcessor._cleanup_worker_files(
-                    temp_video_file, None, audio_temp_file
-                )
+                FaceProcessor._cleanup_worker_files(temp_video_file, None, audio_temp_file)
                 return None
 
-            # Combine video and audio
             command_combine = (
                 f'ffmpeg -y -i "{temp_video_file}" -i "{audio_temp_file}" -threads {n_data_loader_thread} '
                 f'-c:v copy -c:a copy "{final_video_file}" -loglevel error'
@@ -1016,17 +1043,13 @@ class FaceProcessor:
                 sys.stderr.write(
                     f"Error: ffmpeg combine failed for {crop_file_base} (retcode {ret_combine.returncode}).\\nCmd: {command_combine}\\nError: {ret_combine.stderr.strip()}\\r\\n"
                 )
-                FaceProcessor._cleanup_worker_files(
-                    temp_video_file, final_video_file, audio_temp_file
-                )
+                FaceProcessor._cleanup_worker_files(temp_video_file, final_video_file, audio_temp_file)
                 return None
-
-            # Success: final_video_file and audio_temp_file are created.
-            # temp_video_file should be removed now as it's intermediate.
+            
             if os.path.exists(temp_video_file):
                 os.remove(temp_video_file)
 
-            return {"track": track, "proc_track": dets}
+            return {"track": output_track_data, "proc_track": output_proc_track_data}
 
         except Exception as e:
             sys.stderr.write(
@@ -1039,29 +1062,20 @@ class FaceProcessor:
         finally:
             if (
                 vOut is not None
-            ):  # If vOut was initialized but not released due to early exit/exception
+            ): 
                 vOut.release()
             if main_video_cap is not None:
                 main_video_cap.release()
-            # Further ensure temp_video_file is cleaned if it wasn't handled by success/specific error paths
-            # This is a fallback, primary removal should happen in try/except logic.
-            if os.path.exists(temp_video_file):
-                # Only remove if we are not on a success path (where it's already removed)
-                # and if it's not being kept because final files failed to create (where cleanup would have run)
-                # This final removal is tricky; ideally, all paths correctly remove it.
-                # For safety, if it exists and the final products don't, it's likely a remnant of failure.
-                if not (
-                    os.path.exists(final_video_file) and os.path.exists(audio_temp_file)
-                ):
+            if not (os.path.exists(final_video_file) and os.path.exists(audio_temp_file)):
+                if os.path.exists(temp_video_file):
                     try:
                         os.remove(temp_video_file)
                     except OSError:
-                        pass
+                        pass # Already logged by _cleanup_worker_files if it was called
 
     def video_tracks(self, all_tracks):
         video_tracks_results = []
-
-        # Prepare arguments for each worker call
+        
         tasks_args = []
         for ii, track in enumerate(all_tracks):
             crop_file_base = os.path.join(self.args.pycrop_path, f"{ii:05d}")
