@@ -14,7 +14,6 @@ from datetime import datetime
 import copy
 import queue
 import threading
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import torch
 import numpy
@@ -858,268 +857,33 @@ class FaceProcessor:
             iou = interArea / float(boxAArea + boxBArea - interArea)
         return iou
 
-    @staticmethod
-    def _cleanup_worker_files(temp_video, final_video, audio_temp):
-        # Helper to remove files created by a worker attempt
-        for f_path in [temp_video, final_video, audio_temp]:
-            if f_path and os.path.exists(f_path):
-                try:
-                    os.remove(f_path)
-                except OSError as e:
-                    sys.stderr.write(
-                        f"Warning: Worker cleanup could not remove {f_path}: {e}\\r\\n"
-                    )
+    def video_tracks(self, all_tracks):
+        video_tracks = []
+        main_video_cap = cv2.VideoCapture(self.args.video_file_path)
 
-    @staticmethod
-    def _crop_video_worker(args_tuple):
-        (
-            video_file_path,
-            track,
-            crop_file_base,
-            crop_scale,
-            audio_file_path_orig,
-            n_data_loader_thread,
-        ) = args_tuple
-
-        main_video_cap = None
-        vOut = None
-        temp_video_file = crop_file_base + "t.avi"
-        final_video_file = crop_file_base + ".avi"
-        audio_temp_file = crop_file_base + ".wav"  # This is what evaluate_network needs
+        if not main_video_cap.isOpened():
+            sys.stderr.write(
+                f"Error: Could not open video file {self.args.video_file_path} in video_tracks method.\\r\\n"
+            )
+            return []
 
         try:
-            original_frames_to_crop = track["frame"]
-            if not original_frames_to_crop.size:
-                sys.stderr.write(
-                    f"Warning: Worker: No frames in track for {crop_file_base}. Skipping track output.\\r\\n"
-                )
-                return None
-
-            main_video_cap = cv2.VideoCapture(video_file_path)
-            if not main_video_cap.isOpened():
-                sys.stderr.write(
-                    f"Error: Worker could not open video file {video_file_path}. Skipping track.\\r\\n"
-                )
-                return None
-
-            vOut = cv2.VideoWriter(
-                temp_video_file, cv2.VideoWriter_fourcc(*"XVID"), 25, (224, 224)
-            )
-            if not vOut.isOpened():
-                sys.stderr.write(
-                    f"Error: Worker could not open temp video writer {temp_video_file}. Skipping track.\\r\\n"
-                )
-                return None
-
-            dets = track["bbox"] # Original bbox data from the track input
-            # The dets returned by the worker (proc_track) will be smoothed and potentially truncated x,y,s values.
-            # For bs calculation within the loop, we use the raw bbox from the input track.
-            # The proc_track construction is separate.
-            
-            smoothed_dets_components = {
-                "x": signal.medfilt(numpy.array([(det[0] + det[2]) / 2 for det in track["bbox"]]), kernel_size=13),
-                "y": signal.medfilt(numpy.array([(det[1] + det[3]) / 2 for det in track["bbox"]]), kernel_size=13),
-                "s": signal.medfilt(numpy.array([max((det[3] - det[1]), (det[2] - det[0])) / 2 for det in track["bbox"]]), kernel_size=13),
-            }
-
-            frames_written = 0
-            for fidx_in_track, original_frame_num in enumerate(original_frames_to_crop):
-                main_video_cap.set(cv2.CAP_PROP_POS_FRAMES, original_frame_num)
-                ret, image = main_video_cap.read()
-                if not ret:
-                    sys.stderr.write(
-                        f"Warning: Worker could not read frame {original_frame_num} from {video_file_path}. Skipping frame.\\r\\n"
-                    )
-                    continue
-
-                cs = crop_scale
-                # Use smoothed components for cropping, ensuring fidx_in_track is valid for these arrays
-                if not (fidx_in_track < len(smoothed_dets_components["s"])):
-                    sys.stderr.write(f"Warning: Worker: fidx_in_track {fidx_in_track} out of bounds for smoothed_dets_components. Skipping frame {original_frame_num}.\\r\\n")
-                    continue
-                bs = smoothed_dets_components["s"][fidx_in_track]
-
-                if image is None:  # Should be caught by 'not ret' but defensive check
-                    sys.stderr.write(
-                        f"Warning: Worker image for frame {original_frame_num} is None. Skipping frame.\\r\\n"
-                    )
-                    continue
-
-                bsi = int(bs * (1 + 2 * cs))
-                padded_image = numpy.pad(
-                    image,
-                    ((bsi, bsi), (bsi, bsi), (0, 0)),
-                    "constant",
-                    constant_values=(110, 110),
-                )
-                my = smoothed_dets_components["y"][fidx_in_track] + bsi
-                mx = smoothed_dets_components["x"][fidx_in_track] + bsi
-                
-                y_start, y_end = int(my - bs), int(my + bs * (1 + 2 * cs)) # bs should be from smoothed_dets_components["s"][fidx_in_track]
-                x_start, x_end = int(mx - bs * (1 + cs)), int(mx + bs * (1 + cs))
-
-                if not (
-                    y_start < y_end
-                    and x_start < x_end
-                    and y_start >= 0
-                    and x_start >= 0
-                    and y_end <= padded_image.shape[0]
-                    and x_end <= padded_image.shape[1]
-                ):
-                    sys.stderr.write(
-                        f"Warning: Worker invalid crop for frame {original_frame_num}. Skipping. "
-                        f"y_start={y_start}, y_end={y_end}, x_start={x_start}, x_end={x_end}, padded_shape={padded_image.shape}\\r\\n"
-                    )
-                    continue
-                face = padded_image[y_start:y_end, x_start:x_end]
-                if face.size == 0:
-                    sys.stderr.write(
-                        f"Warning: Worker cropped face for frame {original_frame_num} is empty. Skipping.\\r\\n"
-                    )
-                    continue
-                vOut.write(cv2.resize(face, (224, 224)))
-                frames_written += 1
-            
-            vOut.release()  # Release the temporary video file
-            vOut = None  # Mark as released
-
-            if frames_written == 0:
-                sys.stderr.write(f"Warning: Worker: No frames were actually written to {temp_video_file} for {crop_file_base}. Skipping track output.\\r\\n")
-                FaceProcessor._cleanup_worker_files(temp_video_file, None, None)
-                return None
-
-            # Prepare output track and dets data, adjusted for frames_written
-            output_track_data = copy.deepcopy(track)
-            output_proc_track_data = {}
-
-            if frames_written < len(original_frames_to_crop):
-                sys.stderr.write(
-                    f"Warning: Worker: Only {frames_written}/{len(original_frames_to_crop)} frames written for {crop_file_base}. "
-                    f"Adjusting track data to match actual frames written.\\r\\n"
-                )
-                output_track_data["frame"] = track["frame"][:frames_written]
-                output_track_data["bbox"] = track["bbox"][:frames_written]
-                if "confidence" in output_track_data: 
-                    output_track_data["confidence"] = track["confidence"][:frames_written]
-            # Else, frames_written == len(original_frames_to_crop), so track data is already correct.
-
-            # Populate proc_track with smoothed and potentially truncated components
-            output_proc_track_data["x"] = smoothed_dets_components["x"][:frames_written]
-            output_proc_track_data["y"] = smoothed_dets_components["y"][:frames_written]
-            output_proc_track_data["s"] = smoothed_dets_components["s"][:frames_written]
-
-            # Audio extraction should use the duration of *actual* frames written
-            # which corresponds to the length of output_track_data["frame"]
-            if not output_track_data["frame"].size:
-                 sys.stderr.write(f"Error: Worker: output_track_data[\"frame\"] is empty for {crop_file_base} after adjustments. Skipping track.\\r\\n")
-                 FaceProcessor._cleanup_worker_files(temp_video_file, None, None) 
-                 return None
-
-            audio_start = output_track_data["frame"][0] / 25.0
-            audio_end = (output_track_data["frame"][-1] + 1) / 25.0
-            
-            command_audio = (
-                f'ffmpeg -y -i "{audio_file_path_orig}" -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 '
-                f'-threads {n_data_loader_thread} -ss {audio_start:.3f} -to {audio_end:.3f} "{audio_temp_file}" -loglevel error'
-            )
-            ret_audio = subprocess.run(
-                command_audio, shell=True, capture_output=True, text=True
-            )
-            if ret_audio.returncode != 0:
-                sys.stderr.write(
-                    f"Error: ffmpeg audio extraction failed for {crop_file_base} (retcode {ret_audio.returncode}).\\nCmd: {command_audio}\\nError: {ret_audio.stderr.strip()}\\r\\n"
-                )
-                FaceProcessor._cleanup_worker_files(temp_video_file, None, audio_temp_file)
-                return None
-
-            command_combine = (
-                f'ffmpeg -y -i "{temp_video_file}" -i "{audio_temp_file}" -threads {n_data_loader_thread} '
-                f'-c:v copy -c:a copy "{final_video_file}" -loglevel error'
-            )
-            ret_combine = subprocess.run(
-                command_combine, shell=True, capture_output=True, text=True
-            )
-            if ret_combine.returncode != 0:
-                sys.stderr.write(
-                    f"Error: ffmpeg combine failed for {crop_file_base} (retcode {ret_combine.returncode}).\\nCmd: {command_combine}\\nError: {ret_combine.stderr.strip()}\\r\\n"
-                )
-                FaceProcessor._cleanup_worker_files(temp_video_file, final_video_file, audio_temp_file)
-                return None
-            
-            if os.path.exists(temp_video_file):
-                os.remove(temp_video_file)
-
-            return {"track": output_track_data, "proc_track": output_proc_track_data}
-
-        except Exception as e:
-            sys.stderr.write(
-                f"Exception in worker for {crop_file_base}: {type(e).__name__} {e}\\r\\n"
-            )
-            FaceProcessor._cleanup_worker_files(
-                temp_video_file, final_video_file, audio_temp_file
-            )
-            return None
-        finally:
-            if (
-                vOut is not None
-            ): 
-                vOut.release()
-            if main_video_cap is not None:
-                main_video_cap.release()
-            if not (os.path.exists(final_video_file) and os.path.exists(audio_temp_file)):
-                if os.path.exists(temp_video_file):
-                    try:
-                        os.remove(temp_video_file)
-                    except OSError:
-                        pass # Already logged by _cleanup_worker_files if it was called
-
-    def video_tracks(self, all_tracks):
-        video_tracks_results = []
-        
-        tasks_args = []
-        for ii, track in enumerate(all_tracks):
-            crop_file_base = os.path.join(self.args.pycrop_path, f"{ii:05d}")
-            # Pass necessary self.args attributes individually
-            args_tuple = (
-                self.args.video_file_path,
-                track,
-                crop_file_base,
-                self.args.crop_scale,
-                os.path.join(
-                    self.args.pyavi_path, "audio.wav"
-                ),  # Path to original full audio
-                self.args.n_data_loader_thread,
-            )
-            tasks_args.append(args_tuple)
-
-        # Determine the number of workers. Can be based on CPU count or a fixed number.
-        # os.cpu_count() can be None, so handle that.
-        num_workers = min(self.args.n_data_loader_thread, os.cpu_count() or 1)
-
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            futures = [
-                executor.submit(self._crop_video_worker, task_arg)
-                for task_arg in tasks_args
-            ]
-
-            for future in tqdm.tqdm(
-                as_completed(futures),
-                total=len(futures),
-                desc="Cropping tracks (Parallel)",
+            for ii, track in tqdm.tqdm(
+                enumerate(all_tracks), total=len(all_tracks), desc="Cropping tracks"
             ):
-                try:
-                    result = future.result()
-                    if result:  # If worker didn't return None (error)
-                        video_tracks_results.append(result)
-                except Exception as e:
-                    # This captures exceptions from the worker process execution itself,
-                    # though _crop_video_worker also has its own try-except.
-                    sys.stderr.write(f"Error processing a track future: {e}\\r\\n")
+                video_tracks.append(
+                    self.crop_video(
+                        main_video_cap,
+                        track,
+                        os.path.join(self.args.pycrop_path, f"{ii:05d}"),
+                    )
+                )
+        finally:
+            main_video_cap.release()  # Ensure the video capture is released
 
-        print(
-            f"\\n{time.strftime('%Y-%m-%d %H:%M:%S')} Face Crop completed. Processed {len(video_tracks_results)} tracks."
-        )
-        return video_tracks_results
+        print(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} Face Crop completed")
+
+        return video_tracks
 
     def crop_video(self, main_video_cap, track, cropFile):
         self.args.audio_file_path = os.path.join(self.args.pyavi_path, "audio.wav")
@@ -1455,13 +1219,20 @@ class ActiveSpeakerDetector:
 
                         if embed_a.size(1) != embed_v.size(1):
                             print(
-                                f"[WARN] evaluate_network: {file_name} - Embed lengths differ (A:{embed_a.size(1)}, V:{embed_v.size(1)}) Duration:{duration}s, Batch:{i}. Truncating."
+                                f"[INFO] evaluate_network: {file_name} - Embed lengths differ (A:{embed_a.size(1)}, V:{embed_v.size(1)}) Duration:{duration}s, Batch:{i}. Padding shorter."
                             )
-                            min_len = min(embed_a.size(1), embed_v.size(1))
-                            embed_a = embed_a[:, :min_len, :]
-                            embed_v = embed_v[:, :min_len, :]
+                            if embed_a.size(1) < embed_v.size(1):
+                                diff = embed_v.size(1) - embed_a.size(1)
+                                last_vector_a = embed_a[:, -1:, :] # Keep dim for repeat
+                                padding_a = last_vector_a.repeat(1, diff, 1)
+                                embed_a = torch.cat((embed_a, padding_a), dim=1)
+                            else: # embed_v.size(1) < embed_a.size(1)
+                                diff = embed_a.size(1) - embed_v.size(1)
+                                last_vector_v = embed_v[:, -1:, :] # Keep dim for repeat
+                                padding_v = last_vector_v.repeat(1, diff, 1)
+                                embed_v = torch.cat((embed_v, padding_v), dim=1)
 
-                        if embed_a.size(1) == 0:
+                        if embed_a.size(1) == 0: # This check should ideally be hit less or not at all if padding works
                             print(
                                 f"[WARN] evaluate_network: {file_name} - Zero sequence length for embeddings after potential truncation. Skipping batch."
                             )
