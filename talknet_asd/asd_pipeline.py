@@ -349,7 +349,11 @@ class FaceProcessor:
 
         gpu_id = 0 if self.args.device == torch.device("cuda") else -1
         fp16_enabled = self.args.dtype == torch.float16
-        detector_instance = RetinaFace(gpu_id=gpu_id, fp16=fp16_enabled)
+        detector_instance = RetinaFace(
+            gpu_id=gpu_id,
+            fp16=fp16_enabled,
+            network="resnet50",
+        )
         print(f"Detector instance device: {detector_instance.device}")
         print(f"Detector instance model dtype: fp16={detector_instance.fp16}")
         # if self.args.device == torch.device("cuda"):
@@ -1223,16 +1227,22 @@ class ActiveSpeakerDetector:
                             )
                             if embed_a.size(1) < embed_v.size(1):
                                 diff = embed_v.size(1) - embed_a.size(1)
-                                last_vector_a = embed_a[:, -1:, :] # Keep dim for repeat
+                                last_vector_a = embed_a[
+                                    :, -1:, :
+                                ]  # Keep dim for repeat
                                 padding_a = last_vector_a.repeat(1, diff, 1)
                                 embed_a = torch.cat((embed_a, padding_a), dim=1)
-                            else: # embed_v.size(1) < embed_a.size(1)
+                            else:  # embed_v.size(1) < embed_a.size(1)
                                 diff = embed_a.size(1) - embed_v.size(1)
-                                last_vector_v = embed_v[:, -1:, :] # Keep dim for repeat
+                                last_vector_v = embed_v[
+                                    :, -1:, :
+                                ]  # Keep dim for repeat
                                 padding_v = last_vector_v.repeat(1, diff, 1)
                                 embed_v = torch.cat((embed_v, padding_v), dim=1)
 
-                        if embed_a.size(1) == 0: # This check should ideally be hit less or not at all if padding works
+                        if (
+                            embed_a.size(1) == 0
+                        ):  # This check should ideally be hit less or not at all if padding works
                             print(
                                 f"[WARN] evaluate_network: {file_name} - Zero sequence length for embeddings after potential truncation. Skipping batch."
                             )
