@@ -14,8 +14,6 @@ from datetime import datetime
 import copy
 import queue
 import threading
-import concurrent.futures
-import multiprocessing
 
 import torch
 import numpy
@@ -861,230 +859,145 @@ class FaceProcessor:
 
     def video_tracks(self, all_tracks):
         video_tracks = []
-        # main_video_cap = cv2.VideoCapture(self.args.video_file_path) # Removed: Each worker opens its own
+        main_video_cap = cv2.VideoCapture(self.args.video_file_path)
 
-        # if not main_video_cap.isOpened(): # Removed
-        #     sys.stderr.write( # Removed
-        #         f"Error: Could not open video file {self.args.video_file_path} in video_tracks method.\\r\\n" # Removed
-        #     ) # Removed
-        #     return [] # Removed
+        if not main_video_cap.isOpened():
+            sys.stderr.write(
+                f"Error: Could not open video file {self.args.video_file_path} in video_tracks method.\\r\\n"
+            )
+            return []
 
-        # try: # Removed
-        # for ii, track in tqdm.tqdm( # Removed
-        #     enumerate(all_tracks), total=len(all_tracks), desc="Cropping tracks" # Removed
-        # ): # Removed
-        #     video_tracks.append( # Removed
-        #         self.crop_video( # Removed
-        #             main_video_cap, # Removed
-        #             track, # Removed
-        #             os.path.join(self.args.pycrop_path, f"{ii:05d}"), # Removed
-        #         ) # Removed
-        #     ) # Removed
-        # finally: # Removed
-        # main_video_cap.release()  # Ensure the video capture is released # Removed
-
-        # New parallel processing logic
-        tasks = []
-        # Use a reasonable number of workers, os.cpu_count() can be a good default
-        # Or self.args.n_data_loader_thread if it's meant for CPU-bound tasks too.
-        # Let's assume n_data_loader_thread is a general indicator of available parallelism.
-        num_workers = min(os.cpu_count() or 1, self.args.n_data_loader_thread)
-
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=num_workers
-        ) as executor:
-            for ii, track_item in enumerate(all_tracks):
-                crop_file_prefix = os.path.join(self.args.pycrop_path, f"{ii:05d}")
-                # Pass the track item, crop_file_prefix, and the args object (Pipeline instance)
-                future = executor.submit(
-                    FaceProcessor._crop_video_worker_static,
-                    track_item,
-                    crop_file_prefix,
-                    self.args,
-                )
-                tasks.append(future)
-
-            for future in tqdm.tqdm(
-                concurrent.futures.as_completed(tasks),
-                total=len(tasks),
-                desc="Cropping tracks (Parallel)",
+        try:
+            for ii, track in tqdm.tqdm(
+                enumerate(all_tracks), total=len(all_tracks), desc="Cropping tracks"
             ):
-                try:
-                    result = future.result()
-                    if result:  # Check if worker returned a valid result
-                        video_tracks.append(result)
-                except Exception as e:
-                    sys.stderr.write(f"Error processing a track in parallel: {e}\\r\\n")
+                video_tracks.append(
+                    self.crop_video(
+                        main_video_cap,
+                        track,
+                        os.path.join(self.args.pycrop_path, f"{ii:05d}"),
+                    )
+                )
+        finally:
+            main_video_cap.release()  # Ensure the video capture is released
 
         print(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} Face Crop completed")
 
         return video_tracks
 
-    @staticmethod
-    def _crop_video_worker_static(track, cropFile, pipeline_args):
-        # pipeline_args is the instance of the Pipeline class, containing all necessary configurations
-        # main_video_cap is no longer passed; this worker opens its own.
+    def crop_video(self, main_video_cap, track, cropFile):
+        self.args.audio_file_path = os.path.join(self.args.pyavi_path, "audio.wav")
 
-        video_capture = cv2.VideoCapture(pipeline_args.video_file_path)
-        if not video_capture.isOpened():
-            sys.stderr.write(
-                f"Error (_crop_video_worker_static): Could not open video file {pipeline_args.video_file_path} for track cropFile {cropFile}.\\r\\n"
-            )
-            return None  # Indicate failure
+        vOut = cv2.VideoWriter(
+            cropFile + "t.avi", cv2.VideoWriter_fourcc(*"XVID"), 25, (224, 224)
+        )  # Write video
+        dets = {"x": [], "y": [], "s": []}
+        for det in track["bbox"]:  # Read the tracks
+            dets["s"].append(max((det[3] - det[1]), (det[2] - det[0])) / 2)
+            dets["y"].append((det[1] + det[3]) / 2)  # crop center x
+            dets["x"].append((det[0] + det[2]) / 2)  # crop center y
+        dets["s"] = signal.medfilt(dets["s"], kernel_size=13)  # Smooth detections
+        dets["x"] = signal.medfilt(dets["x"], kernel_size=13)
+        dets["y"] = signal.medfilt(dets["y"], kernel_size=13)
 
-        try:
-            # Video writing setup
-            vOut = cv2.VideoWriter(
-                cropFile + "t.avi", cv2.VideoWriter_fourcc(*"XVID"), 25, (224, 224)
-            )
-            dets = {"x": [], "y": [], "s": []}
-            for det in track["bbox"]:
-                dets["s"].append(max((det[3] - det[1]), (det[2] - det[0])) / 2)
-                dets["y"].append((det[1] + det[3]) / 2)
-                dets["x"].append((det[0] + det[2]) / 2)
+        original_frames_to_crop = track["frame"]
 
-            dets["s"] = signal.medfilt(dets["s"], kernel_size=13)
-            dets["x"] = signal.medfilt(dets["x"], kernel_size=13)
-            dets["y"] = signal.medfilt(dets["y"], kernel_size=13)
+        for fidx_in_track, original_frame_num in enumerate(original_frames_to_crop):
+            # Seek to the specific frame in the main video
+            main_video_cap.set(cv2.CAP_PROP_POS_FRAMES, original_frame_num)
+            ret, image = main_video_cap.read()
 
-            original_frames_to_crop = track["frame"]
-
-            for fidx_in_track, original_frame_num in enumerate(original_frames_to_crop):
-                video_capture.set(cv2.CAP_PROP_POS_FRAMES, original_frame_num)
-                ret, image = video_capture.read()
-
-                if not ret:
-                    sys.stderr.write(
-                        f"Warning (_crop_video_worker_static): Could not read frame {original_frame_num} (index {fidx_in_track} in track) from {pipeline_args.video_file_path} for cropFile {cropFile}. Skipping frame.\\r\\n"
-                    )
-                    continue
-
-                cs = pipeline_args.crop_scale
-                bs = dets["s"][fidx_in_track]
-                bsi = int(bs * (1 + 2 * cs))
-
-                if image is None:
-                    sys.stderr.write(
-                        f"Warning (_crop_video_worker_static): Image for frame {original_frame_num} is None before padding for cropFile {cropFile}. Skipping frame.\\r\\n"
-                    )
-                    continue
-
-                padded_image = numpy.pad(
-                    image,
-                    ((bsi, bsi), (bsi, bsi), (0, 0)),
-                    "constant",
-                    constant_values=(110, 110),
-                )
-                my = dets["y"][fidx_in_track] + bsi
-                mx = dets["x"][fidx_in_track] + bsi
-
-                y_start, y_end = int(my - bs), int(my + bs * (1 + 2 * cs))
-                x_start, x_end = int(mx - bs * (1 + cs)), int(mx + bs * (1 + cs))
-
-                if not (
-                    y_start < y_end
-                    and x_start < x_end
-                    and y_start >= 0
-                    and x_start >= 0
-                    and y_end <= padded_image.shape[0]
-                    and x_end <= padded_image.shape[1]
-                ):
-                    sys.stderr.write(
-                        f"Warning (_crop_video_worker_static): Invalid crop dimensions for frame {original_frame_num} for cropFile {cropFile}. Skipping frame. "
-                        f"y_start={y_start}, y_end={y_end}, x_start={x_start}, x_end={x_end}, padded_shape={padded_image.shape}\\r\\n"
-                    )
-                    continue
-
-                face = padded_image[y_start:y_end, x_start:x_end]
-
-                if face.size == 0:
-                    sys.stderr.write(
-                        f"Warning (_crop_video_worker_static): Cropped face for frame {original_frame_num} for cropFile {cropFile} is empty. Skipping frame.\\r\\n"
-                    )
-                    continue
-
-                vOut.write(cv2.resize(face, (224, 224)))
-
-            vOut.release()  # Release video writer for "t.avi"
-
-            # Audio processing
-            audioTmp = cropFile + ".wav"
-            # pipeline_args.audio_file_path should be the path to the main audio.wav
-            # (e.g., os.path.join(pipeline_args.pyavi_path, "audio.wav"))
-            # This path is set in VideoPreprocessor.extract_audio and stored on the pipeline_args (self.args) object.
-
-            if (
-                not original_frames_to_crop.size
-            ):  # Handle empty tracks if they somehow get here
+            if not ret:
                 sys.stderr.write(
-                    f"Warning (_crop_video_worker_static): Track for cropFile {cropFile} has no frames. Skipping audio extraction.\\r\\n"
+                    f"Warning: Could not read frame {original_frame_num} (index {fidx_in_track} in track) from {self.args.video_file_path} during crop_video. Skipping frame.\\r\\n"
                 )
-                # Clean up temporary video file if created
-                if os.path.exists(cropFile + "t.avi"):
-                    os.remove(cropFile + "t.avi")
-                return None
+                continue  # Skip this frame if not readable
 
-            audioStart = original_frames_to_crop[0] / 25.0
-            audioEnd = (original_frames_to_crop[-1] + 1) / 25.0
+            cs = self.args.crop_scale
+            bs = dets["s"][
+                fidx_in_track
+            ]  # Detection box size, use fidx_in_track for dets
+            bsi = int(bs * (1 + 2 * cs))  # Pad videos by this amount
 
-            command_audio = (
-                "ffmpeg -y -i %s -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 -threads %d -ss %.3f -to %.3f %s -loglevel panic"
-                % (
-                    pipeline_args.audio_file_path,  # This should be the full audio extracted from the original video
-                    pipeline_args.n_data_loader_thread,
-                    audioStart,
-                    audioEnd,
-                    audioTmp,
-                )
-            )
-            subprocess.call(command_audio, shell=True, stdout=None)
-
-            # Combine audio and video
-            # Check if temp audio and video files were created before combining
-            if not os.path.exists(cropFile + "t.avi") or not os.path.exists(audioTmp):
+            # Pad the image correctly
+            # Ensure image is not None before padding
+            if image is None:
                 sys.stderr.write(
-                    f"Error (_crop_video_worker_static): Temporary video or audio missing for {cropFile}. Cannot combine.\\r\\n"
+                    f"Warning: Image for frame {original_frame_num} is None before padding. Skipping frame.\\r\\n"
                 )
-                if os.path.exists(cropFile + "t.avi"):
-                    os.remove(cropFile + "t.avi")
-                if os.path.exists(audioTmp):
-                    os.remove(audioTmp)
-                return None
+                continue
 
-            command_combine = (
-                "ffmpeg -y -i %st.avi -i %s -threads %d -c:v copy -c:a copy %s.avi -loglevel panic"
-                % (cropFile, audioTmp, pipeline_args.n_data_loader_thread, cropFile)
+            padded_image = numpy.pad(
+                image,
+                ((bsi, bsi), (bsi, bsi), (0, 0)),
+                "constant",
+                constant_values=(
+                    110,
+                    110,
+                ),  # Using default padding color from original code
             )
-            subprocess.call(command_combine, shell=True, stdout=None)
+            my = dets["y"][fidx_in_track] + bsi  # BBox center Y
+            mx = dets["x"][fidx_in_track] + bsi  # BBox center X
 
-            # Cleanup temporary files
-            if os.path.exists(cropFile + "t.avi"):
-                os.remove(cropFile + "t.avi")
-            # audioTmp (.wav) is kept as it's used by evaluate_network
+            # Ensure cropping indices are valid
+            y_start, y_end = int(my - bs), int(my + bs * (1 + 2 * cs))
+            x_start, x_end = int(mx - bs * (1 + cs)), int(mx + bs * (1 + cs))
 
-            return {"track": track, "proc_track": dets}
+            if not (
+                y_start < y_end
+                and x_start < x_end
+                and y_start >= 0
+                and x_start >= 0
+                and y_end <= padded_image.shape[0]
+                and x_end <= padded_image.shape[1]
+            ):
+                sys.stderr.write(
+                    f"Warning: Invalid crop dimensions for frame {original_frame_num}. Skipping frame. \
+                    y_start={y_start}, y_end={y_end}, x_start={x_start}, x_end={x_end}, padded_shape={padded_image.shape}\\r\\n"
+                )
+                continue
 
-        except Exception as e:
-            sys.stderr.write(
-                f"Error in _crop_video_worker_static for {cropFile}: {e}\\r\\n"
+            face = padded_image[
+                y_start:y_end,
+                x_start:x_end,
+            ]
+
+            if face.size == 0:
+                sys.stderr.write(
+                    f"Warning: Cropped face for frame {original_frame_num} is empty. Skipping frame.\\r\\n"
+                )
+                continue
+
+            vOut.write(cv2.resize(face, (224, 224)))
+
+        audioTmp = cropFile + ".wav"
+        # Use the first and last original frame numbers for audio start/end times
+        audioStart = (
+            (original_frames_to_crop[0]) / 25.0
+        )  # Assuming 25 FPS for audio sync
+        audioEnd = (
+            original_frames_to_crop[-1] + 1
+        ) / 25.0  # +1 to include the last frame's duration
+        vOut.release()
+        command = (
+            "ffmpeg -y -i %s -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 -threads %d -ss %.3f -to %.3f %s -loglevel panic"
+            % (
+                self.args.audio_file_path,
+                self.args.n_data_loader_thread,
+                audioStart,
+                audioEnd,
+                audioTmp,
             )
-            # Ensure temporary files are cleaned up on error if they exist
-            if os.path.exists(cropFile + "t.avi"):
-                try:
-                    os.remove(cropFile + "t.avi")
-                except OSError:
-                    pass  # Ignore if already gone or permission issues
-            if os.path.exists(
-                cropFile + ".wav"
-            ):  # audioTmp might be created before error
-                try:
-                    os.remove(cropFile + ".wav")
-                except OSError:
-                    pass
-            return None  # Indicate failure
-        finally:
-            if video_capture.isOpened():
-                video_capture.release()
+        )
+        subprocess.call(command, shell=True, stdout=None)  # Crop audio file
+        _, audio = wavfile.read(audioTmp)
+        command = (
+            "ffmpeg -y -i %st.avi -i %s -threads %d -c:v copy -c:a copy %s.avi -loglevel panic"
+            % (cropFile, audioTmp, self.args.n_data_loader_thread, cropFile)
+        )  # Combine audio and video file
+        subprocess.call(command, shell=True, stdout=None)
+        os.remove(cropFile + "t.avi")
+        return {"track": track, "proc_track": dets}
 
     def save_results(self, video_tracks):
         save_path = os.path.join(self.args.pywork_path, "tracks.pckl")
@@ -1096,6 +1009,9 @@ class ActiveSpeakerDetector:
     def __init__(self, args, dtype=torch.float32):
         self.args = args
         self.dtype = dtype
+        self.model = talkNet(device=args.device, dtype=dtype)
+        self.model.loadParameters(args.pretrain_model)
+        self.model.eval()
 
     @staticmethod
     def _pad_audio_features(features, num_target_samples, num_mfcc_channels=13):
@@ -1151,9 +1067,6 @@ class ActiveSpeakerDetector:
         return padded_frames[:num_target_frames, :, :]
 
     def evaluate_network(self):
-        model = talkNet(device=self.args.device, dtype=self.dtype)
-        model.loadParameters(self.args.pretrain_model)
-        model.eval()
         # GPU: active speaker detection by pretrained TalkNet
         files = glob.glob("%s/*.avi" % self.args.pycrop_path)
         files.sort()
@@ -1301,51 +1214,30 @@ class ActiveSpeakerDetector:
                             .to(self.args.device, dtype=self.dtype)
                         )
 
-                        embed_a = model.model.forward_audio_frontend(input_a)
-                        embed_v = model.model.forward_visual_frontend(input_v)
+                        embed_a = self.model.model.forward_audio_frontend(input_a)
+                        embed_v = self.model.model.forward_visual_frontend(input_v)
 
                         if embed_a.size(1) != embed_v.size(1):
                             print(
-                                f"[WARN] evaluate_network: {file_name} - Embed lengths differ (A:{embed_a.size(1)}, V:{embed_v.size(1)}) Duration:{duration}s, Batch:{i}. Padding shorter."
+                                f"[WARN] evaluate_network: {file_name} - Embed lengths differ (A:{embed_a.size(1)}, V:{embed_v.size(1)}) Duration:{duration}s, Batch:{i}. Truncating."
                             )
-                            if embed_a.size(1) < embed_v.size(1):
-                                # Pad embed_a
-                                diff = embed_v.size(1) - embed_a.size(1)
-                                last_vector_a = embed_a[
-                                    :, -1:, :
-                                ]  # Keep dimensions for cat
-                                padding_a = last_vector_a.repeat(1, diff, 1)
-                                embed_a = torch.cat((embed_a, padding_a), dim=1)
-                            else:
-                                # Pad embed_v
-                                diff = embed_a.size(1) - embed_v.size(1)
-                                last_vector_v = embed_v[
-                                    :, -1:, :
-                                ]  # Keep dimensions for cat
-                                padding_v = last_vector_v.repeat(1, diff, 1)
-                                embed_v = torch.cat((embed_v, padding_v), dim=1)
-                        # Ensure lengths are now equal, otherwise something is wrong
-                        if embed_a.size(1) != embed_v.size(1):
+                            min_len = min(embed_a.size(1), embed_v.size(1))
+                            embed_a = embed_a[:, :min_len, :]
+                            embed_v = embed_v[:, :min_len, :]
+
+                        if embed_a.size(1) == 0:
                             print(
-                                f"[ERROR] evaluate_network: {file_name} - Embed lengths STILL differ after padding (A:{embed_a.size(1)}, V:{embed_v.size(1)}). Skipping batch."
+                                f"[WARN] evaluate_network: {file_name} - Zero sequence length for embeddings after potential truncation. Skipping batch."
                             )
                             continue
 
-                        if (
-                            embed_a.size(1) == 0
-                        ):  # Should also check embed_v, but if they are equal, one check is enough
-                            print(
-                                f"[WARN] evaluate_network: {file_name} - Zero sequence length for embeddings after potential padding. Skipping batch."
-                            )
-                            continue
-
-                        context_a, context_v = model.model.forward_cross_attention(
+                        context_a, context_v = self.model.model.forward_cross_attention(
                             embed_a, embed_v
                         )
-                        out = model.model.forward_audio_visual_backend(
+                        out = self.model.model.forward_audio_visual_backend(
                             context_a, context_v
                         )
-                        score_from_model = model.lossAV.forward(out, labels=None)
+                        score_from_model = self.model.lossAV.forward(out, labels=None)
                         scores_for_duration.extend(score_from_model)
 
                 if scores_for_duration:
@@ -1444,21 +1336,6 @@ class Pipeline:
         face_detection_batch_size: int = 32,
         **kwargs,
     ):
-        # Set multiprocessing start method to 'spawn' for CUDA compatibility
-        # This should be done before any CUDA initialization if possible.
-        try:
-            if multiprocessing.get_start_method(allow_none=True) != "spawn":
-                multiprocessing.set_start_method("spawn", force=True)
-        except RuntimeError:
-            # RuntimeError can occur if the context has already been set and force=False,
-            # or if trying to set it after the context has been used.
-            # If it's already 'spawn', we're good. If it's something else and already used,
-            # this might indicate a deeper issue, but 'force=True' attempts to override.
-            print(
-                "Note: Multiprocessing context already set or used. Attempting to force 'spawn'."
-            )
-            # If 'spawn' is critical and this fails, the program might still error later.
-
         self.device = resolve_device(device=device)
         self.dtype = {
             "float32": torch.float32,
