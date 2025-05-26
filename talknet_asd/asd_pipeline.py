@@ -859,6 +859,18 @@ class FaceProcessor:
         return iou
 
     @staticmethod
+    def _cleanup_worker_files(temp_video, final_video, audio_temp):
+        # Helper to remove files created by a worker attempt
+        for f_path in [temp_video, final_video, audio_temp]:
+            if f_path and os.path.exists(f_path):
+                try:
+                    os.remove(f_path)
+                except OSError as e:
+                    sys.stderr.write(
+                        f"Warning: Worker cleanup could not remove {f_path}: {e}\\r\\n"
+                    )
+
+    @staticmethod
     def _crop_video_worker(args_tuple):
         (
             video_file_path,
@@ -869,32 +881,50 @@ class FaceProcessor:
             n_data_loader_thread,
         ) = args_tuple
 
-        main_video_cap = cv2.VideoCapture(video_file_path)
-        if not main_video_cap.isOpened():
-            sys.stderr.write(
-                f"Error: Worker could not open video file {video_file_path}. Skipping track.\\r\\n"
-            )
-            return None  # Or some indicator of failure
-
-        vOut = cv2.VideoWriter(
-            crop_file_base + "t.avi", cv2.VideoWriter_fourcc(*"XVID"), 25, (224, 224)
-        )
-        dets = {"x": [], "y": [], "s": []}
-        for det in track["bbox"]:
-            dets["s"].append(max((det[3] - det[1]), (det[2] - det[0])) / 2)
-            dets["y"].append((det[1] + det[3]) / 2)
-            dets["x"].append((det[0] + det[2]) / 2)
-        dets["s"] = signal.medfilt(dets["s"], kernel_size=13)
-        dets["x"] = signal.medfilt(dets["x"], kernel_size=13)
-        dets["y"] = signal.medfilt(dets["y"], kernel_size=13)
-
-        original_frames_to_crop = track["frame"]
+        main_video_cap = None
+        vOut = None
+        temp_video_file = crop_file_base + "t.avi"
+        final_video_file = crop_file_base + ".avi"
+        audio_temp_file = crop_file_base + ".wav"  # This is what evaluate_network needs
 
         try:
+            original_frames_to_crop = track["frame"]
+            if not original_frames_to_crop.size:
+                sys.stderr.write(
+                    f"Warning: Worker: No frames in track for {crop_file_base}. Skipping track output.\\r\\n"
+                )
+                # No files should be created or left behind for this case by this point
+                return None
+
+            main_video_cap = cv2.VideoCapture(video_file_path)
+            if not main_video_cap.isOpened():
+                sys.stderr.write(
+                    f"Error: Worker could not open video file {video_file_path}. Skipping track.\\r\\n"
+                )
+                return None
+
+            vOut = cv2.VideoWriter(
+                temp_video_file, cv2.VideoWriter_fourcc(*"XVID"), 25, (224, 224)
+            )
+            if not vOut.isOpened():
+                sys.stderr.write(
+                    f"Error: Worker could not open temp video writer {temp_video_file}. Skipping track.\\r\\n"
+                )
+                return None
+
+            dets = {"x": [], "y": [], "s": []}
+            for det in track["bbox"]:
+                dets["s"].append(max((det[3] - det[1]), (det[2] - det[0])) / 2)
+                dets["y"].append((det[1] + det[3]) / 2)
+                dets["x"].append((det[0] + det[2]) / 2)
+            dets["s"] = signal.medfilt(dets["s"], kernel_size=13)
+            dets["x"] = signal.medfilt(dets["x"], kernel_size=13)
+            dets["y"] = signal.medfilt(dets["y"], kernel_size=13)
+
+            frames_written = 0
             for fidx_in_track, original_frame_num in enumerate(original_frames_to_crop):
                 main_video_cap.set(cv2.CAP_PROP_POS_FRAMES, original_frame_num)
                 ret, image = main_video_cap.read()
-
                 if not ret:
                     sys.stderr.write(
                         f"Warning: Worker could not read frame {original_frame_num} from {video_file_path}. Skipping frame.\\r\\n"
@@ -904,8 +934,7 @@ class FaceProcessor:
                 cs = crop_scale
                 bs = dets["s"][fidx_in_track]
                 bsi = int(bs * (1 + 2 * cs))
-
-                if image is None:
+                if image is None:  # Should be caught by 'not ret' but defensive check
                     sys.stderr.write(
                         f"Warning: Worker image for frame {original_frame_num} is None. Skipping frame.\\r\\n"
                     )
@@ -919,7 +948,6 @@ class FaceProcessor:
                 )
                 my = dets["y"][fidx_in_track] + bsi
                 mx = dets["x"][fidx_in_track] + bsi
-
                 y_start, y_end = int(my - bs), int(my + bs * (1 + 2 * cs))
                 x_start, x_end = int(mx - bs * (1 + cs)), int(mx + bs * (1 + cs))
 
@@ -932,67 +960,103 @@ class FaceProcessor:
                     and x_end <= padded_image.shape[1]
                 ):
                     sys.stderr.write(
-                        f"Warning: Worker invalid crop dimensions for frame {original_frame_num}. Skipping. "
+                        f"Warning: Worker invalid crop for frame {original_frame_num}. Skipping. "
                         f"y_start={y_start}, y_end={y_end}, x_start={x_start}, x_end={x_end}, padded_shape={padded_image.shape}\\r\\n"
                     )
                     continue
-
                 face = padded_image[y_start:y_end, x_start:x_end]
-
                 if face.size == 0:
                     sys.stderr.write(
                         f"Warning: Worker cropped face for frame {original_frame_num} is empty. Skipping.\\r\\n"
                     )
                     continue
                 vOut.write(cv2.resize(face, (224, 224)))
+                frames_written += 1
 
-            audio_tmp = crop_file_base + ".wav"
-            if not original_frames_to_crop.size:  # check if the array is empty
+            vOut.release()  # Release the temporary video file
+            vOut = None  # Mark as released
+
+            if frames_written == 0:
                 sys.stderr.write(
-                    f"Warning: Worker empty original_frames_to_crop for {crop_file_base}. Skipping audio processing.\\r\\n"
+                    f"Warning: Worker: No frames were actually written to {temp_video_file} for {crop_file_base}. Skipping track.\\r\\n"
                 )
-                # If there are no frames, we can't process audio based on frame numbers.
-                # Decide how to handle this: maybe return an empty track or skip audio.
-                # For now, let's skip audio processing and let the video (if any frames were written) be without audio.
-            else:
-                audio_start = original_frames_to_crop[0] / 25.0
-                audio_end = (original_frames_to_crop[-1] + 1) / 25.0
-                command_audio = (
-                    "ffmpeg -y -i %s -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 -threads %d -ss %.3f -to %.3f %s -loglevel panic"
-                    % (
-                        audio_file_path_orig,
-                        n_data_loader_thread,
-                        audio_start,
-                        audio_end,
-                        audio_tmp,
-                    )
-                )
-                subprocess.call(command_audio, shell=True, stdout=None)
+                FaceProcessor._cleanup_worker_files(
+                    temp_video_file, None, None
+                )  # Only temp_video exists
+                return None
 
-                command_combine = (
-                    "ffmpeg -y -i %st.avi -i %s -threads %d -c:v copy -c:a copy %s.avi -loglevel panic"
-                    % (crop_file_base, audio_tmp, n_data_loader_thread, crop_file_base)
+            # Audio extraction
+            audio_start = original_frames_to_crop[0] / 25.0
+            audio_end = (original_frames_to_crop[-1] + 1) / 25.0
+            command_audio = (
+                f'ffmpeg -y -i "{audio_file_path_orig}" -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 '
+                f'-threads {n_data_loader_thread} -ss {audio_start:.3f} -to {audio_end:.3f} "{audio_temp_file}" -loglevel error'
+            )
+            ret_audio = subprocess.run(
+                command_audio, shell=True, capture_output=True, text=True
+            )
+            if ret_audio.returncode != 0:
+                sys.stderr.write(
+                    f"Error: ffmpeg audio extraction failed for {crop_file_base} (retcode {ret_audio.returncode}).\\nCmd: {command_audio}\\nError: {ret_audio.stderr.strip()}\\r\\n"
                 )
-                subprocess.call(command_combine, shell=True, stdout=None)
-                # os.remove(audio_tmp) # Do not remove, evaluate_network needs this .wav file
+                FaceProcessor._cleanup_worker_files(
+                    temp_video_file, None, audio_temp_file
+                )
+                return None
+
+            # Combine video and audio
+            command_combine = (
+                f'ffmpeg -y -i "{temp_video_file}" -i "{audio_temp_file}" -threads {n_data_loader_thread} '
+                f'-c:v copy -c:a copy "{final_video_file}" -loglevel error'
+            )
+            ret_combine = subprocess.run(
+                command_combine, shell=True, capture_output=True, text=True
+            )
+            if ret_combine.returncode != 0:
+                sys.stderr.write(
+                    f"Error: ffmpeg combine failed for {crop_file_base} (retcode {ret_combine.returncode}).\\nCmd: {command_combine}\\nError: {ret_combine.stderr.strip()}\\r\\n"
+                )
+                FaceProcessor._cleanup_worker_files(
+                    temp_video_file, final_video_file, audio_temp_file
+                )
+                return None
+
+            # Success: final_video_file and audio_temp_file are created.
+            # temp_video_file should be removed now as it's intermediate.
+            if os.path.exists(temp_video_file):
+                os.remove(temp_video_file)
+
+            return {"track": track, "proc_track": dets}
 
         except Exception as e:
-            sys.stderr.write(f"Error in worker for {crop_file_base}: {e}\\r\\n")
-            # Clean up partial files if error occurs
-            if os.path.exists(crop_file_base + "t.avi"):
-                os.remove(crop_file_base + "t.avi")
-            if os.path.exists(crop_file_base + ".wav"):
-                os.remove(crop_file_base + ".wav")
-            if os.path.exists(crop_file_base + ".avi"):
-                os.remove(crop_file_base + ".avi")
-            return None  # Indicate failure
+            sys.stderr.write(
+                f"Exception in worker for {crop_file_base}: {type(e).__name__} {e}\\r\\n"
+            )
+            FaceProcessor._cleanup_worker_files(
+                temp_video_file, final_video_file, audio_temp_file
+            )
+            return None
         finally:
-            vOut.release()
-            main_video_cap.release()
-            if os.path.exists(crop_file_base + "t.avi"):  # Ensure temp video is removed
-                os.remove(crop_file_base + "t.avi")
-
-        return {"track": track, "proc_track": dets}
+            if (
+                vOut is not None
+            ):  # If vOut was initialized but not released due to early exit/exception
+                vOut.release()
+            if main_video_cap is not None:
+                main_video_cap.release()
+            # Further ensure temp_video_file is cleaned if it wasn't handled by success/specific error paths
+            # This is a fallback, primary removal should happen in try/except logic.
+            if os.path.exists(temp_video_file):
+                # Only remove if we are not on a success path (where it's already removed)
+                # and if it's not being kept because final files failed to create (where cleanup would have run)
+                # This final removal is tricky; ideally, all paths correctly remove it.
+                # For safety, if it exists and the final products don't, it's likely a remnant of failure.
+                if not (
+                    os.path.exists(final_video_file) and os.path.exists(audio_temp_file)
+                ):
+                    try:
+                        os.remove(temp_video_file)
+                    except OSError:
+                        pass
 
     def video_tracks(self, all_tracks):
         video_tracks_results = []
