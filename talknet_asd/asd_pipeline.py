@@ -352,8 +352,8 @@ class FaceProcessor:
         detector_instance = RetinaFace(gpu_id=gpu_id, fp16=fp16_enabled)
         print(f"Detector instance device: {detector_instance.device}")
         print(f"Detector instance model dtype: fp16={detector_instance.fp16}")
-        if self.args.device == torch.device("cuda"):
-            detector_instance.model.compile(mode="reduce-overhead", fullgraph=True)
+        # if self.args.device == torch.device("cuda"):
+        #     detector_instance.model.compile(mode="reduce-overhead", fullgraph=True)
 
         frame_queue = queue.Queue(
             maxsize=batch_size * 8
