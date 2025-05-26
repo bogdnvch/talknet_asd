@@ -974,7 +974,7 @@ class FaceProcessor:
                     % (crop_file_base, audio_tmp, n_data_loader_thread, crop_file_base)
                 )
                 subprocess.call(command_combine, shell=True, stdout=None)
-                os.remove(audio_tmp)
+                # os.remove(audio_tmp) # Do not remove, evaluate_network needs this .wav file
 
         except Exception as e:
             sys.stderr.write(f"Error in worker for {crop_file_base}: {e}\\r\\n")
