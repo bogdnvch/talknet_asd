@@ -260,7 +260,7 @@ class FaceProcessor:
         backend: str = "opencv",
         start_time: Optional[Union[str, float, int]] = None,
         end_time: Optional[Union[str, float, int]] = None,
-        start_in_scene: bool = False,
+        start_in_scene: bool = True,
     ) -> SceneList:
         video = open_video(video_path, backend=backend)
         if start_time is not None:
@@ -280,7 +280,9 @@ class FaceProcessor:
         if scene_manager.stats_manager is not None:
             scene_manager.stats_manager.save_to_csv(csv_file=stats_file_path)
 
-        current_scene_list = scene_manager.get_scene_list(start_in_scene=start_in_scene)
+        current_scene_list = scene_manager.get_scene_list(
+            start_in_scene=start_in_scene,
+        )
 
         if current_scene_list:
             # Manually adjust the end of the last scene to be the end of the video
