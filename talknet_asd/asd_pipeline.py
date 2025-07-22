@@ -14,6 +14,7 @@ from datetime import datetime
 import copy
 import queue
 import threading
+import concurrent.futures
 
 import torch
 import numpy
@@ -511,7 +512,6 @@ class FaceProcessor:
                                 max_size=max_size,
                                 return_dict=True,
                             )
-                            # ... (result processing logic - duplicated)
                             for i, (current_fidx_in_batch, faces_in_frame) in enumerate(
                                 zip(frame_indices_batch, all_faces_in_batch)
                             ):
@@ -857,42 +857,54 @@ class FaceProcessor:
         interArea = max(0, xB - xA) * max(0, yB - yA)
         boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
         boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-        if evalCol == True:
+        if evalCol:
             iou = interArea / float(boxAArea)
         else:
             iou = interArea / float(boxAArea + boxBArea - interArea)
         return iou
 
     def video_tracks(self, all_tracks):
-        video_tracks = []
-        main_video_cap = cv2.VideoCapture(self.args.video_file_path)
+        tasks = [(ii, track) for ii, track in enumerate(all_tracks)]
+        video_tracks = [None] * len(all_tracks)
 
+        def crop_task(task_args):
+            ii, track = task_args
+            crop_file_path = os.path.join(self.args.pycrop_path, f"{ii:05d}")
+            return ii, self.crop_video(track, crop_file_path)
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.args.n_data_loader_thread
+        ) as executor:
+            with tqdm.tqdm(
+                total=len(tasks), desc="Cropping tracks in parallel"
+            ) as pbar:
+                for future in concurrent.futures.as_completed(
+                    [executor.submit(crop_task, task) for task in tasks]
+                ):
+                    try:
+                        ii, result = future.result()
+                        if result:  # Ensure result is not None or empty
+                            video_tracks[ii] = result
+                    except Exception as e:
+                        print(f"A worker failed to process a track: {e}")
+                    pbar.update(1)
+
+        # Filter out failed tasks which will be None
+        successful_tracks = [track for track in video_tracks if track is not None]
+        print(
+            f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} Face Crop completed. "
+            f"Successfully processed {len(successful_tracks)}/{len(all_tracks)} tracks."
+        )
+
+        return successful_tracks
+
+    def crop_video(self, track, cropFile):
+        main_video_cap = cv2.VideoCapture(self.args.video_file_path)
         if not main_video_cap.isOpened():
             sys.stderr.write(
-                f"Error: Could not open video file {self.args.video_file_path} in video_tracks method.\\r\\n"
+                f"Error: Could not open video file {self.args.video_file_path} in a crop_video worker.\\r\\n"
             )
-            return []
-
-        try:
-            for ii, track in tqdm.tqdm(
-                enumerate(all_tracks), total=len(all_tracks), desc="Cropping tracks"
-            ):
-                video_tracks.append(
-                    self.crop_video(
-                        main_video_cap,
-                        track,
-                        os.path.join(self.args.pycrop_path, f"{ii:05d}"),
-                    )
-                )
-        finally:
-            main_video_cap.release()  # Ensure the video capture is released
-
-        print(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} Face Crop completed")
-
-        return video_tracks
-
-    def crop_video(self, main_video_cap, track, cropFile):
-        self.args.audio_file_path = os.path.join(self.args.pyavi_path, "audio.wav")
+            return None
 
         vOut = cv2.VideoWriter(
             cropFile + "t.avi", cv2.VideoWriter_fourcc(*"XVID"), 25, (224, 224)
@@ -907,17 +919,23 @@ class FaceProcessor:
         dets["y"] = signal.medfilt(dets["y"], kernel_size=13)
 
         original_frames_to_crop = track["frame"]
+        if len(original_frames_to_crop) == 0:
+            vOut.release()
+            main_video_cap.release()
+            return None
+
+        # Seek only once to the start of the track's frames
+        main_video_cap.set(cv2.CAP_PROP_POS_FRAMES, original_frames_to_crop[0])
 
         for fidx_in_track, original_frame_num in enumerate(original_frames_to_crop):
-            # Seek to the specific frame in the main video
-            main_video_cap.set(cv2.CAP_PROP_POS_FRAMES, original_frame_num)
+            # Read the next frame directly, no more seeking in the loop
             ret, image = main_video_cap.read()
 
             if not ret:
                 sys.stderr.write(
                     f"Warning: Could not read frame {original_frame_num} (index {fidx_in_track} in track) from {self.args.video_file_path} during crop_video. Skipping frame.\\r\\n"
                 )
-                continue  # Skip this frame if not readable
+                continue
 
             cs = self.args.crop_scale
             bs = dets["s"][
@@ -976,6 +994,8 @@ class FaceProcessor:
 
             vOut.write(cv2.resize(face, (224, 224)))
 
+        vOut.release()
+
         audioTmp = cropFile + ".wav"
         # Use the first and last original frame numbers for audio start/end times
         audioStart = (
@@ -984,7 +1004,6 @@ class FaceProcessor:
         audioEnd = (
             original_frames_to_crop[-1] + 1
         ) / 25.0  # +1 to include the last frame's duration
-        vOut.release()
         command = (
             "ffmpeg -y -i %s -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 -threads %d -ss %.3f -to %.3f %s -loglevel panic"
             % (
@@ -1003,6 +1022,7 @@ class FaceProcessor:
         )  # Combine audio and video file
         subprocess.call(command, shell=True, stdout=None)
         os.remove(cropFile + "t.avi")
+        main_video_cap.release()
         return {"track": track, "proc_track": dets}
 
     def save_results(self, video_tracks):
