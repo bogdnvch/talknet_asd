@@ -363,7 +363,7 @@ class FaceProcessor:
         #     detector_instance.model.compile(mode="reduce-overhead", fullgraph=True)
 
         frame_queue = queue.Queue(
-            maxsize=batch_size * 8
+            maxsize=batch_size * 16
         )  # Queue for (fidx, img_rgb) or None
         loader_exception = None  # To capture exceptions from the loader thread
 
@@ -445,14 +445,12 @@ class FaceProcessor:
                                 ) in enumerate(
                                     zip(frame_indices_batch, all_faces_in_batch)
                                 ):
-                                    # ... (result processing logic - same as below)
                                     frame_detections_for_frame = []
                                     if (
                                         isinstance(faces_in_frame, list)
                                         and len(faces_in_frame) > 0
                                     ):
                                         for face in faces_in_frame:
-                                            # ... (detailed face processing)
                                             facial_area = face["box"]
                                             if face["score"] < threshold:
                                                 continue
@@ -1373,6 +1371,7 @@ class Pipeline:
         face_detection_threshold: float = 0.6,
         face_detection_max_size: int = 1920,
         face_detection_batch_size: int = 32,
+        visualize: bool = False,
         **kwargs,
     ):
         self.device = resolve_device(device=device)
@@ -1398,6 +1397,7 @@ class Pipeline:
         self.num_failed_det = num_failed_det
         self.min_face_size = min_face_size
         self.crop_scale = crop_scale
+        self.visualize = visualize
 
         self.face_detection_avg_time_threshold = face_detection_avg_time_threshold
         self.face_detection_min_frames_for_avg = face_detection_min_frames_for_avg
@@ -1467,7 +1467,8 @@ class Pipeline:
             scores = self.speaker_detector.evaluate_network()
             self.speaker_detector.save_results(scores=scores)
 
-            visualization(scores=scores, tracks=video_tracks, args=self)
+            if self.visualize:
+                visualization(scores=scores, tracks=video_tracks, args=self)
         except Exception:
             print(f"Error while trying to process video {self.video_path}")
             self._cleanup_cache()
