@@ -7,6 +7,9 @@ setup(
     author="Maksim Bogdanovich",
     url="https://github.com/bogdnvch/talknet_asd",
     packages=find_packages(),
+    # NOTE: batch-face is a dependency that is not listed in install_requires.
+    # It should be installed manually without its own dependencies using the following command:
+    # pip install --no-deps git+https://github.com/elliottzheng/batch-face.git@master
     install_requires=[
         "python-speech-features>=0.6,<0.7",
         "scipy>=1.15.2,<2.0.0",
@@ -19,7 +22,7 @@ setup(
         "ffmpeg>=1.4,<2.0",
         "ultralytics>=8.3.117,<8.4.0",
         "huggingface-hub>=0.30.2",
-        "batch-face @ git+https://github.com/elliottzheng/batch-face.git@master",
+        "opencv-transforms>=0.0.6",
     ],
     python_requires=">=3.12",
 )
