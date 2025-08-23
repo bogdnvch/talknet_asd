@@ -116,3 +116,6 @@ venv.bak/
 .mypy_cache/
 
 notes.md
+
+.vscode/
+speaker_detections.json

@@ -12,8 +12,6 @@ from pathlib import Path
 from typing import Literal, Optional, Union
 from datetime import datetime
 import copy
-import queue
-import threading
 import concurrent.futures
 
 import torch
@@ -36,10 +34,10 @@ from scenedetect import (
 
 
 from huggingface_hub import hf_hub_download
-from batch_face import RetinaFace
 
 from talknet_asd.talkNet import talkNet
 from talknet_asd.utils.resolve_device import resolve_device
+from talknet_asd.mogface.inference import MogFaceDetector
 
 warnings.filterwarnings("ignore")
 
@@ -343,421 +341,33 @@ class FaceProcessor:
             )
             return False, []
 
-        detections = [[] for _ in range(total_frames)]
-        total_detection_time_gpu_and_assembly = 0.0  # Renamed for clarity
-
-        threshold = self.args.face_detection_threshold
-        max_size = self.args.face_detection_max_size
-        batch_size = self.args.face_detection_batch_size
-
-        gpu_id = 0 if self.args.device == torch.device("cuda") else -1
-        fp16_enabled = self.args.dtype == torch.float16
-        detector_instance = RetinaFace(
-            gpu_id=gpu_id,
-            fp16=fp16_enabled,
-            network="resnet50",
-        )
-        print(f"Detector instance device: {detector_instance.device}")
-        print(f"Detector instance model dtype: fp16={detector_instance.fp16}")
-        # if self.args.device == torch.device("cuda"):
-        #     detector_instance.model.compile(mode="reduce-overhead", fullgraph=True)
-
-        frame_queue = queue.Queue(
-            maxsize=batch_size * 16
-        )  # Queue for (fidx, img_rgb) or None
-        loader_exception = None  # To capture exceptions from the loader thread
-
-        def _frame_loader_worker():
-            nonlocal loader_exception
-            try:
-                cap_loader = cv2.VideoCapture(self.args.video_file_path)
-                if not cap_loader.isOpened():
-                    # Cannot directly write to sys.stderr from thread easily without GIL issues with print
-                    # Instead, signal error through an exception or a dedicated error queue/variable
-                    raise IOError(
-                        f"Frame loader: Could not open video file {self.args.video_file_path}"
-                    )
-
-                for fidx_loader in range(total_frames):
-                    ret_loader, img_loader = cap_loader.read()
-                    if not ret_loader:
-                        # Signal that loading is done or an error occurred
-                        frame_queue.put(None)  # Sentinel for end or error
-                        # print(f"Frame loader: Failed to read frame {fidx_loader}", file=sys.stderr) # Not thread-safe for direct print
-                        return  # Stop loader thread
-
-                    img_rgb_loader = cv2.cvtColor(img_loader, cv2.COLOR_BGR2RGB)
-                    frame_queue.put((fidx_loader, img_rgb_loader))
-
-                frame_queue.put(
-                    None
-                )  # Sentinel to indicate successful completion of all frames
-                cap_loader.release()
-            except Exception as e:
-                loader_exception = e  # Store exception
-                frame_queue.put(None)  # Ensure consumer unblocks if loader crashes
-
-        loader_thread = threading.Thread(target=_frame_loader_worker)
-        loader_thread.start()
-
-        frames_batch = []
-        frame_indices_batch = []
-
-        processed_frames_count = 0
-
-        with tqdm.tqdm(total=total_frames, desc="Detecting faces (Batched)") as pbar:
-            while processed_frames_count < total_frames:
-                try:
-                    # Timeout helps prevent indefinite blocking if loader thread has an issue not caught by sentinel
-                    queued_item = frame_queue.get(timeout=20)
-                except queue.Empty:
-                    # This could happen if loader thread is stuck or died without putting sentinel
-                    if loader_thread.is_alive():
-                        sys.stderr.write(
-                            "Warning: Frame queue timeout, loader thread might be stuck.\\r\\n"
-                        )
-                        # Potentially break or implement more robust error handling
-                        continue  # Try getting again or break
-                    else:
-                        # Loader died, check for exception
-                        if loader_exception:
-                            sys.stderr.write(
-                                f"Error: Frame loader thread exited with exception: {loader_exception}\\r\\n"
-                            )
-                        else:
-                            sys.stderr.write(
-                                "Error: Frame loader thread died unexpectedly.\\r\\n"
-                            )
-                        # Process any remaining items in frames_batch just in case, then break
-                        if frames_batch:  # Process final partial batch if any
-                            # This block is duplicated below, consider refactoring into a helper
-                            batch_loop_start_time = time.time()
-                            try:
-                                all_faces_in_batch = detector_instance(
-                                    frames_batch,
-                                    threshold=threshold,
-                                    max_size=max_size,
-                                    return_dict=True,
-                                )
-                                for i, (
-                                    current_fidx_in_batch,
-                                    faces_in_frame,
-                                ) in enumerate(
-                                    zip(frame_indices_batch, all_faces_in_batch)
-                                ):
-                                    frame_detections_for_frame = []
-                                    if (
-                                        isinstance(faces_in_frame, list)
-                                        and len(faces_in_frame) > 0
-                                    ):
-                                        for face in faces_in_frame:
-                                            facial_area = face["box"]
-                                            if face["score"] < threshold:
-                                                continue
-                                            if isinstance(facial_area, dict):
-                                                if not all(
-                                                    key in facial_area
-                                                    for key in ["x", "y", "w", "h"]
-                                                ):
-                                                    continue
-                                                x1, y1, x2, y2 = (
-                                                    facial_area["x"],
-                                                    facial_area["y"],
-                                                    facial_area["x"] + facial_area["w"],
-                                                    facial_area["y"] + facial_area["h"],
-                                                )
-                                            else:
-                                                x1, y1, x2, y2 = (
-                                                    facial_area[0],
-                                                    facial_area[1],
-                                                    facial_area[2],
-                                                    facial_area[3],
-                                                )
-                                            if x2 - x1 <= 0 or y2 - y1 <= 0:
-                                                continue
-                                            bbox = [x1, y1, x2, y2]
-                                            frame_detections_for_frame.append(
-                                                {
-                                                    "frame": current_fidx_in_batch,
-                                                    "bbox": bbox,
-                                                    "conf": face["score"],
-                                                }
-                                            )
-                                    if 0 <= current_fidx_in_batch < len(detections):
-                                        detections[current_fidx_in_batch] = (
-                                            frame_detections_for_frame
-                                        )
-                            except Exception as e:
-                                print(
-                                    f"Error processing final batch from queue timeout: {str(e)}"
-                                )
-                            total_detection_time_gpu_and_assembly += (
-                                time.time() - batch_loop_start_time
-                            )
-                        return False, detections  # Abort
-
-                if loader_exception:  # Check for exception from loader thread
-                    sys.stderr.write(
-                        f"Error: Frame loader thread failed: {loader_exception}\\r\\n"
-                    )
-                    # Process any items already batched
-                    if frames_batch:  # Process final partial batch if any
-                        batch_loop_start_time = time.time()
-                        try:
-                            all_faces_in_batch = detector_instance(
-                                frames_batch,
-                                threshold=threshold,
-                                max_size=max_size,
-                                return_dict=True,
-                            )
-                            for i, (current_fidx_in_batch, faces_in_frame) in enumerate(
-                                zip(frame_indices_batch, all_faces_in_batch)
-                            ):
-                                frame_detections_for_frame = []
-                                if (
-                                    isinstance(faces_in_frame, list)
-                                    and len(faces_in_frame) > 0
-                                ):
-                                    for face in faces_in_frame:
-                                        facial_area = face["box"]
-                                        if face["score"] < threshold:
-                                            continue
-                                        if isinstance(facial_area, dict):
-                                            if not all(
-                                                key in facial_area
-                                                for key in ["x", "y", "w", "h"]
-                                            ):
-                                                continue
-                                            x1, y1, x2, y2 = (
-                                                facial_area["x"],
-                                                facial_area["y"],
-                                                facial_area["x"] + facial_area["w"],
-                                                facial_area["y"] + facial_area["h"],
-                                            )
-                                        else:
-                                            x1, y1, x2, y2 = (
-                                                facial_area[0],
-                                                facial_area[1],
-                                                facial_area[2],
-                                                facial_area[3],
-                                            )
-                                        if x2 - x1 <= 0 or y2 - y1 <= 0:
-                                            continue
-                                        bbox = [x1, y1, x2, y2]
-                                        frame_detections_for_frame.append(
-                                            {
-                                                "frame": current_fidx_in_batch,
-                                                "bbox": bbox,
-                                                "conf": face["score"],
-                                            }
-                                        )
-                                if 0 <= current_fidx_in_batch < len(detections):
-                                    detections[current_fidx_in_batch] = (
-                                        frame_detections_for_frame
-                                    )
-                        except Exception as e:
-                            print(
-                                f"Error processing batch after loader exception: {str(e)}"
-                            )
-                        total_detection_time_gpu_and_assembly += (
-                            time.time() - batch_loop_start_time
-                        )
-                    return False, detections  # Abort
-
-                if queued_item is None:  # Sentinel: loader finished or error
-                    # Process any remaining frames in the current batch
-                    if frames_batch:
-                        batch_loop_start_time = time.time()
-                        try:
-                            all_faces_in_batch = detector_instance(
-                                frames_batch,
-                                threshold=threshold,
-                                max_size=max_size,
-                                return_dict=True,
-                            )
-                            # ... (result processing logic - duplicated)
-                            for i, (current_fidx_in_batch, faces_in_frame) in enumerate(
-                                zip(frame_indices_batch, all_faces_in_batch)
-                            ):
-                                frame_detections_for_frame = []
-                                if (
-                                    isinstance(faces_in_frame, list)
-                                    and len(faces_in_frame) > 0
-                                ):
-                                    for face in faces_in_frame:
-                                        facial_area = face["box"]
-                                        if face["score"] < threshold:
-                                            continue
-                                        if isinstance(facial_area, dict):
-                                            if not all(
-                                                key in facial_area
-                                                for key in ["x", "y", "w", "h"]
-                                            ):
-                                                continue
-                                            x1, y1, x2, y2 = (
-                                                facial_area["x"],
-                                                facial_area["y"],
-                                                facial_area["x"] + facial_area["w"],
-                                                facial_area["y"] + facial_area["h"],
-                                            )
-                                        else:
-                                            x1, y1, x2, y2 = (
-                                                facial_area[0],
-                                                facial_area[1],
-                                                facial_area[2],
-                                                facial_area[3],
-                                            )
-                                        if x2 - x1 <= 0 or y2 - y1 <= 0:
-                                            continue
-                                        bbox = [x1, y1, x2, y2]
-                                        frame_detections_for_frame.append(
-                                            {
-                                                "frame": current_fidx_in_batch,
-                                                "bbox": bbox,
-                                                "conf": face["score"],
-                                            }
-                                        )
-                                if 0 <= current_fidx_in_batch < len(detections):
-                                    detections[current_fidx_in_batch] = (
-                                        frame_detections_for_frame
-                                    )
-                        except Exception as e:
-                            print(f"Error processing final batch: {str(e)}")
-                        finally:  # Ensure batch clear and time update
-                            total_detection_time_gpu_and_assembly += (
-                                time.time() - batch_loop_start_time
-                            )
-                            frames_batch = []
-                            frame_indices_batch = []
-                    break  # Exit the while loop, all frames processed or loader stopped
-
-                fidx, img_rgb = queued_item
-                frames_batch.append(img_rgb)
-                frame_indices_batch.append(fidx)
-
-                # pbar.update(1) # Update pbar for each frame received from queue
-
-                if len(frames_batch) == batch_size:
-                    batch_loop_start_time = time.time()
-                    try:
-                        all_faces_in_batch = detector_instance(
-                            frames_batch,
-                            threshold=threshold,
-                            max_size=max_size,
-                            return_dict=True,
-                        )
-                        for i, (current_fidx_in_batch, faces_in_frame) in enumerate(
-                            zip(frame_indices_batch, all_faces_in_batch)
-                        ):
-                            frame_detections_for_frame = []
-                            if (
-                                isinstance(faces_in_frame, list)
-                                and len(faces_in_frame) > 0
-                            ):
-                                for face in faces_in_frame:
-                                    facial_area = face["box"]
-                                    if face["score"] < threshold:
-                                        continue
-                                    if isinstance(facial_area, dict):
-                                        if not all(
-                                            key in facial_area
-                                            for key in ["x", "y", "w", "h"]
-                                        ):
-                                            continue
-                                        x1, y1 = facial_area["x"], facial_area["y"]
-                                        x2, y2 = (
-                                            facial_area["x"] + facial_area["w"],
-                                            facial_area["y"] + facial_area["h"],
-                                        )
-                                    else:
-                                        x1, y1, x2, y2 = (
-                                            facial_area[0],
-                                            facial_area[1],
-                                            facial_area[2],
-                                            facial_area[3],
-                                        )
-
-                                    if x2 - x1 <= 0 or y2 - y1 <= 0:
-                                        continue
-                                    bbox = [x1, y1, x2, y2]
-                                    frame_detections_for_frame.append(
-                                        {
-                                            "frame": current_fidx_in_batch,
-                                            "bbox": bbox,
-                                            "conf": face["score"],
-                                        }
-                                    )
-                            if (
-                                0 <= current_fidx_in_batch < len(detections)
-                            ):  # Boundary check
-                                detections[current_fidx_in_batch] = (
-                                    frame_detections_for_frame
-                                )
-                            else:
-                                sys.stderr.write(
-                                    f"Warning: Frame index {current_fidx_in_batch} out of bounds for detections list. Skipping.\\r\\n"
-                                )
-                    except Exception as e:
-                        print(
-                            f"Error processing batch starting with frame index {frame_indices_batch[0] if frame_indices_batch else 'unknown'}: {str(e)}"
-                        )
-                        # For frames in this failed batch, detections will remain as empty lists
-                    finally:  # Ensure batch clear and time update
-                        total_detection_time_gpu_and_assembly += (
-                            time.time() - batch_loop_start_time
-                        )
-                        pbar.update(
-                            len(frames_batch)
-                        )  # Update pbar by number of frames processed in this batch
-                        processed_frames_count += len(frames_batch)
-                        frames_batch = []
-                        frame_indices_batch = []
-
-                # Slow detection check logic
-                # This check uses processed_frames_count which is updated after each batch
-                if (
-                    processed_frames_count
-                    >= self.args.face_detection_min_frames_for_avg
-                    and processed_frames_count > 0
-                ):
-                    avg_time_per_frame = (
-                        total_detection_time_gpu_and_assembly / processed_frames_count
-                    )
-                    if (
-                        self.args.enable_skip_slow_face_detection
-                        and avg_time_per_frame
-                        > self.args.face_detection_avg_time_threshold
-                    ):
-                        sys.stderr.write(
-                            time.strftime("%Y-%m-%d %H:%M:%S")
-                            + f" Face detection too slow (avg {avg_time_per_frame:.2f}s/frame > "
-                            + f"{self.args.face_detection_avg_time_threshold:.2f}s/frame). "
-                            + f"Skipping video {self.args.video_path}.\\r\\n"
-                        )
-                        # Ensure loader thread is stopped
-                        # frame_queue.put(None) # Not strictly necessary if we are breaking, but good for completeness
-                        loader_thread.join(timeout=5)  # Attempt to join loader thread
-                        return False, detections
-
-        loader_thread.join(timeout=10)  # Wait for loader thread to finish
-        if loader_thread.is_alive():
+        try:
+            detector_instance = MogFaceDetector()
+            detections = detector_instance.detect_video(self.args.video_file_path)
+            del detector_instance
+            torch.cuda.empty_cache()
+        except Exception as e:
             sys.stderr.write(
-                "Warning: Frame loader thread did not exit cleanly after processing.\\r\\n"
+                f"Error: Could not detect faces using MogFaceDetector: {e}\\r\\n"
             )
-        if loader_exception:  # Final check if an error occurred late in loader
-            sys.stderr.write(
-                f"Error: Frame loader thread failed with: {loader_exception}\\r\\n"
-            )
-            return False, detections
+            return False, []
 
-        with open(os.path.join(self.args.pywork_path, "faces.pckl"), "wb") as f:
-            pickle.dump(detections, f)
+        detections_with_frame_num = []
+        for frame_num, raw_frame_detections in enumerate(detections):
+            frame_detections = []
+            for raw_detection in raw_frame_detections:
+                if raw_detection["coef"] < self.args.face_detection_threshold:
+                    continue
+                frame_detections.append(
+                    {
+                        "frame": frame_num,
+                        "bbox": raw_detection["bbox"],
+                        "conf": raw_detection["coef"],
+                    }
+                )
+            detections_with_frame_num.append(frame_detections)
 
-        sys.stderr.write(
-            time.strftime("%Y-%m-%d %H:%M:%S")
-            + " Face detection and save in %s \\r\\n" % (self.args.pywork_path)
-        )
-        return True, detections
+        return True, detections_with_frame_num
 
     def track_faces(self, scenes, face_detections):
         all_tracks = []
@@ -1365,13 +975,8 @@ class Pipeline:
         device: Literal["auto", "cpu", "cuda"] = "auto",
         scene_detector_backend: Literal["opencv", "pyav"] = "opencv",
         dtype: Literal["float32", "float16"] = "float16",
-        face_detection_avg_time_threshold: float = 1.0,
-        face_detection_min_frames_for_avg: int = 10,
-        enable_skip_slow_face_detection: bool = False,
-        face_detection_threshold: float = 0.6,
-        face_detection_max_size: int = 1920,
-        face_detection_batch_size: int = 32,
         visualize: bool = False,
+        face_detection_threshold: float = 0.4,
         **kwargs,
     ):
         self.device = resolve_device(device=device)
@@ -1398,13 +1003,7 @@ class Pipeline:
         self.min_face_size = min_face_size
         self.crop_scale = crop_scale
         self.visualize = visualize
-
-        self.face_detection_avg_time_threshold = face_detection_avg_time_threshold
-        self.face_detection_min_frames_for_avg = face_detection_min_frames_for_avg
-        self.enable_skip_slow_face_detection = enable_skip_slow_face_detection
         self.face_detection_threshold = face_detection_threshold
-        self.face_detection_max_size = face_detection_max_size
-        self.face_detection_batch_size = face_detection_batch_size
 
         self.pyavi_path = None
         self.pywork_path = None

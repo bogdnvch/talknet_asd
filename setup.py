@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="talknet_asd",
-    version="0.2.2",
+    version="0.2.3",
     description="Active Speaker Detection using TalkNet",
     author="Maksim Bogdanovich",
     url="https://github.com/bogdnvch/talknet_asd",
@@ -17,9 +17,7 @@ setup(
         "tqdm>=4.67.1,<5.0.0",
         "numpy>=1.23.5,<2.1.1",
         "ffmpeg>=1.4,<2.0",
-        "ultralytics>=8.3.117,<8.4.0",
         "huggingface-hub>=0.30.2",
-        "batch-face @ git+https://github.com/elliottzheng/batch-face.git@master",
     ],
     python_requires=">=3.12",
 )
