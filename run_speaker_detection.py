@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 import click
 import json
@@ -162,6 +163,17 @@ def delete_dir(dir_to_delete: Path):
     help="Device to run the ASD pipeline on",
 )
 def main(video_file: str, output_file: str, delete_asd_dir: bool, device: str):
+    for _ in range(2):
+        _run(
+            video_file=video_file,
+            output_file=output_file,
+            delete_asd_dir=delete_asd_dir,
+            device=device,
+        )
+        time.sleep(10)
+
+
+def _run(video_file: str, output_file: str, delete_asd_dir: bool, device: str) -> None:
     Path(output_file).parent.mkdir(parents=True, exist_ok=True)
     asd_pipeline = ASDPipeline(video_path=video_file, device=device)
     asd_pipeline.run()

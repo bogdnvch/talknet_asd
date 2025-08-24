@@ -1,6 +1,6 @@
+import gc
 import os
 import sys
-import time
 
 from huggingface_hub import hf_hub_download
 import torch
@@ -299,82 +299,6 @@ def _batch_preparer_worker(proc_idx, cfg, batch_q, prepped_q):
             break
 
 
-def _postprocess_worker(proc_idx, cfg, model_out_q, result_q):
-    """
-    CPU process: receives ("candidates", [list per micro-batch]) and emits final per-variant dets
-    as ("dets", frame_idx, key, c_dets).
-    """
-    import numpy as _np
-    import torch as _torch
-
-    # Avoid CPU oversubscription
-    _torch.set_num_threads(int(cfg.get("num_threads", 1)))
-
-    score_th = float(cfg.get("score_th", 0.01))
-    nms_th = float(cfg.get("nms_th", 0.3))
-    max_per_img = int(cfg.get("max_per_img", 750))
-
-    while True:
-        try:
-            item = model_out_q.get()
-        except (EOFError, OSError):
-            break
-        if item is None:
-            # Forward sentinel upstream to aggregator and exit
-            try:
-                result_q.put(None)
-            except (EOFError, OSError):
-                pass
-            break
-        mode_tag, payload = item
-        if mode_tag != "candidates":
-            continue
-        candidates = payload
-        for v in candidates:
-            boxes = v["boxes"]
-            scores = v["scores"]
-            if boxes.size == 0:
-                c_dets = _np.empty([0, 5], dtype=_np.float32)
-            else:
-                w = boxes[:, 2] - boxes[:, 0] + 1
-                h = boxes[:, 3] - boxes[:, 1] + 1
-                s = float(v["shrink"]) if v["shrink"] != 0 else 1.0
-                boxes[:, 0] /= s
-                boxes[:, 1] /= s
-                boxes[:, 2] = boxes[:, 0] + w / s - 1
-                boxes[:, 3] = boxes[:, 1] + h / s - 1
-                score_vec = scores[:, 0] if scores.ndim == 2 else scores.reshape(-1)
-                inds = _np.where(score_vec > score_th)[0]
-                if len(inds) == 0:
-                    c_dets = _np.empty([0, 5], dtype=_np.float32)
-                else:
-                    c_bboxes = boxes[inds]
-                    c_scores = score_vec[inds]
-                    c_dets = _np.hstack((c_bboxes, c_scores[:, _np.newaxis])).astype(
-                        _np.float32, copy=False
-                    )
-                    keep = nms_numpy(c_dets, nms_th)
-                    c_dets = c_dets[keep, :]
-                    if max_per_img > 0:
-                        image_scores = c_dets[:, -1]
-                        if len(image_scores) > max_per_img:
-                            image_thresh = _np.sort(image_scores)[-max_per_img]
-                            keep = _np.where(c_dets[:, -1] >= image_thresh)[0]
-                            c_dets = c_dets[keep, :]
-                if v["flip"] and c_dets.size:
-                    det_t = _np.zeros(c_dets.shape, dtype=_np.float32)
-                    det_t[:, 0] = v["w0"] - c_dets[:, 2] - 1
-                    det_t[:, 1] = c_dets[:, 1]
-                    det_t[:, 2] = v["w0"] - c_dets[:, 0] - 1
-                    det_t[:, 3] = c_dets[:, 3]
-                    det_t[:, 4] = c_dets[:, 4]
-                    c_dets = det_t
-            try:
-                result_q.put(("dets", v["frame_idx"], v["key"], c_dets))
-            except (EOFError, OSError):
-                break
-
-
 # ---------------------------------------------
 # Detector class with __call__ for three modes
 # ---------------------------------------------
@@ -385,7 +309,7 @@ class MogFaceDetector:
         self,
         device: torch.device = None,
         precision: str = "bf16",
-        max_source_image_size: int = 1920,
+        max_source_image_size: int = 1280,
         max_pixels_per_batch: int = 60_000_000,
         max_frame_queue_size: int = 32,
         max_batch_queue_size: int = 128,
@@ -487,6 +411,7 @@ class MogFaceDetector:
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to(self.device)
         self.model.eval()
+        self.model.compile(mode="reduce-overhead", fullgraph=True)
         if self.use_autocast:
             print(f"Autocast enabled with precision: {precision}")
 
@@ -494,16 +419,32 @@ class MogFaceDetector:
         self._anchor_cache = {}  # (H,W) -> np anchors_cxcywh
         self._anchor_torch_cpu = {}  # (H,W) -> torch.FloatTensor (CPU)
         self._anchor_torch_device = {}  # (H,W,device,idx) -> torch.FloatTensor (on device)
-        # Thread-local storage for compiled model to ensure compile & run happen in the same thread
-        self._tls = threading.local()
 
-    def _get_compiled_model_for_current_thread(self):
-        compiled = getattr(self._tls, "compiled_model", None)
-        if compiled is None:
-            # Compile within the current thread to keep CUDA Graph TLS consistent
-            compiled = torch.compile(self.model, mode="reduce-overhead", fullgraph=True)
-            self._tls.compiled_model = compiled
-        return compiled
+    def delete_model(self):
+        print(
+            f"Memory allocated before deleting model: {torch.cuda.memory_allocated() / 1024**2} MB"
+        )
+        torch.compiler.reset()
+        print(
+            f"Memory allocated after resetting compiler: {torch.cuda.memory_allocated() / 1024**2} MB"
+        )
+        self.model.to("cpu")
+        print(
+            f"Memory allocated after moving model to CPU: {torch.cuda.memory_allocated() / 1024**2} MB"
+        )
+        del self.model
+        print(
+            f"Memory allocated after deleting model: {torch.cuda.memory_allocated() / 1024**2} MB"
+        )
+        gc.collect()
+        print(
+            f"Memory allocated after garbage collection: {torch.cuda.memory_allocated() / 1024**2} MB"
+        )
+        torch.cuda.empty_cache()
+        print(
+            f"Memory allocated after emptying cache: {torch.cuda.memory_allocated() / 1024**2} MB"
+        )
+        self.model = None
 
     def _round_up_to_multiple(self, value, multiple):
         if multiple is None or multiple <= 1:
@@ -792,8 +733,7 @@ class MogFaceDetector:
                     enabled=self.use_autocast,
                 ),
             ):
-                compiled_model = self._get_compiled_model_for_current_thread()
-                out_conf_b, out_loc_b = compiled_model(xt)
+                out_conf_b, out_loc_b = self.model(xt)
             out_conf_b = out_conf_b.float()
             out_loc_b = out_loc_b.float()
 
@@ -1116,7 +1056,6 @@ class MogFaceDetector:
         frame_q: "queue.Queue" = queue.Queue(maxsize=self.max_frame_queue_size)
         batch_q: "queue.Queue" = queue.Queue(maxsize=self.max_batch_queue_size)
         prepped_q: "queue.Queue" = queue.Queue(maxsize=self.max_prepped_queue_size)
-        result_q: "queue.Queue" = queue.Queue(maxsize=self.max_model_out_queue_size)
 
         # Shared result dict: frame_idx -> {key: dets}
         results = {}
@@ -1313,211 +1252,7 @@ class MogFaceDetector:
             for _ in range(num_pre):
                 batch_q.put(None)
 
-        def gpu_model_thread():
-            device = self.device
-            sentinels_seen = 0
-            with (
-                torch.no_grad(),
-                torch.autocast(
-                    device_type=device.type,
-                    dtype=self.amp_torch_dtype,
-                    enabled=self.use_autocast,
-                ),
-            ):
-                while True:
-                    try:
-                        item = prepped_q.get()
-                    except (EOFError, OSError, FileNotFoundError):
-                        try:
-                            result_q.put(None)
-                        except Exception:
-                            pass
-                        break
-                    if item is None:
-                        sentinels_seen += 1
-                        if sentinels_seen == num_pre:
-                            try:
-                                result_q.put(None)
-                            except Exception:
-                                pass
-                            break
-                        else:
-                            continue
-                    batch, max_h, max_w, xt_cpu = item
-                    if self.verbose:
-                        try:
-                            est_cost = int(xt_cpu.shape[0]) * int(max_h) * int(max_w)
-                            print(
-                                f"GPU batch: num={xt_cpu.shape[0]}, padded=({max_h}x{max_w}), pixels={est_cost:,} / budget={self.max_pixels_per_batch:,}"
-                            )
-                        except Exception:
-                            pass
-                    # Move to device; pinning occurs in preparer
-                    t0 = time.time()
-                    xt = xt_cpu.to(device, non_blocking=True)
-                    if self.verbose and device.type == "cuda":
-                        torch.cuda.synchronize()
-                    t1 = time.time()
-                    compiled_model = self._get_compiled_model_for_current_thread()
-                    out_conf_b, out_loc_b = compiled_model(xt)
-                    if self.verbose and device.type == "cuda":
-                        torch.cuda.synchronize()
-                    t2 = time.time()
-                    if self.verbose:
-                        print(
-                            f"H2D: {(t1 - t0) * 1000:.2f} ms, forward: {(t2 - t1) * 1000:.2f} ms"
-                        )
-
-                    anchors_dev = self._get_anchors_torch(max_h, max_w, device)
-                    anchor_centers = anchors_dev[:, :2]
-                    B = out_conf_b.shape[0]
-                    for bi in range(B):
-                        v = batch[bi]
-                        if v.get("dummy", False):
-                            continue
-                        hi, wi = v["hi"], v["wi"]
-                        s = v["shrink"]
-                        valid_mask = (anchor_centers[:, 0] <= wi) & (
-                            anchor_centers[:, 1] <= hi
-                        )
-                        out_conf = out_conf_b[bi]
-                        out_loc = out_loc_b[bi]
-                        decode_bbox = decode_boxes(out_loc, anchors_dev)
-                        boxes = decode_bbox[valid_mask]
-                        scores = out_conf[valid_mask]
-                        scores_flat = (
-                            scores[:, 0]
-                            if (scores.dim() == 2 and scores.size(1) == 1)
-                            else scores.reshape(-1)
-                        )
-                        k = int(min(self.top_k, int(scores_flat.numel())))
-                        if k <= 0:
-                            c_dets = np.empty([0, 5], dtype=np.float32)
-                        else:
-                            topk_vals, topk_idx = torch.topk(scores_flat, k)
-                            boxes_sel = boxes[topk_idx]
-                            # scale back to original resolution (shrink factor)
-                            w = boxes_sel[:, 2] - boxes_sel[:, 0] + 1
-                            h = boxes_sel[:, 3] - boxes_sel[:, 1] + 1
-                            b0 = boxes_sel[:, 0] / s
-                            b1 = boxes_sel[:, 1] / s
-                            b2 = b0 + w / s - 1
-                            b3 = b1 + h / s - 1
-                            boxes_adj = torch.stack([b0, b1, b2, b3], dim=1)
-                            score_mask = topk_vals > float(self.score_th)
-                            if score_mask.any():
-                                boxes_adj = boxes_adj[score_mask]
-                                vals = topk_vals[score_mask]
-                                if _HAS_TV_NMS:
-                                    try:
-                                        keep = tv_nms(
-                                            boxes_adj, vals, float(self.nms_th)
-                                        )
-                                    except Exception:
-                                        keep = None
-                                else:
-                                    keep = None
-                                if keep is None:
-                                    # fallback to CPU NMS
-                                    b_np = boxes_adj.float().detach().cpu().numpy()
-                                    v_np = (
-                                        vals.float()
-                                        .detach()
-                                        .cpu()
-                                        .numpy()
-                                        .reshape(-1, 1)
-                                    )
-                                    dets_np = np.hstack((b_np, v_np)).astype(
-                                        np.float32, copy=False
-                                    )
-                                    keep_idx = nms_numpy(dets_np, float(self.nms_th))
-                                    dets_np = dets_np[keep_idx, :]
-                                    if (
-                                        self.max_per_img > 0
-                                        and dets_np.shape[0] > self.max_per_img
-                                    ):
-                                        image_scores = dets_np[:, -1]
-                                        image_thresh = np.sort(image_scores)[
-                                            -self.max_per_img
-                                        ]
-                                        keep2 = np.where(
-                                            dets_np[:, -1] >= image_thresh
-                                        )[0]
-                                        dets_np = dets_np[keep2, :]
-                                    c_dets = dets_np
-                                else:
-                                    if self.max_per_img > 0:
-                                        keep = keep[: int(self.max_per_img)]
-                                    boxes_kept = (
-                                        boxes_adj[keep].float().detach().cpu().numpy()
-                                    )
-                                    scores_kept = (
-                                        vals[keep]
-                                        .float()
-                                        .detach()
-                                        .cpu()
-                                        .numpy()
-                                        .reshape(-1, 1)
-                                    )
-                                    c_dets = np.hstack(
-                                        (boxes_kept, scores_kept)
-                                    ).astype(np.float32, copy=False)
-                            else:
-                                c_dets = np.empty([0, 5], dtype=np.float32)
-
-                        if v["flip"] and c_dets.size:
-                            det_t = np.zeros(c_dets.shape, dtype=np.float32)
-                            det_t[:, 0] = v["w0"] - c_dets[:, 2] - 1
-                            det_t[:, 1] = c_dets[:, 1]
-                            det_t[:, 2] = v["w0"] - c_dets[:, 0] - 1
-                            det_t[:, 3] = c_dets[:, 3]
-                            det_t[:, 4] = c_dets[:, 4]
-                            c_dets = det_t
-
-                        try:
-                            result_q.put(
-                                (
-                                    "dets",
-                                    v["frame_idx"],
-                                    v["key"],
-                                    c_dets,
-                                    v.get("ratio", 1.0),
-                                )
-                            )
-                        except Exception:
-                            break
-
-        def aggregator_thread():
-            # Collect results from model thread (final dets)
-            while True:
-                msg = result_q.get()
-                if msg is None:
-                    break
-                # Backward-compatible tuple unpacking (support 4-tuple or 5-tuple)
-                if len(msg) == 4:
-                    tag, frame_idx, key, c_dets = msg
-                    ratio = 1.0
-                else:
-                    tag, frame_idx, key, c_dets, ratio = msg
-                if tag != "dets":
-                    continue
-                # Rescale detections back to original video coordinates if resized
-                if ratio != 1.0 and c_dets.size:
-                    scale = 1.0 / float(ratio)
-                    c_dets = c_dets.copy()
-                    c_dets[:, 0:4] *= scale
-                with results_lock:
-                    fr = results.setdefault(frame_idx, {})
-                    fr[key] = c_dets
-                    if len(fr) == expected_counts.get(frame_idx, 0):
-                        with pbar_lock:
-                            pbar.update(1)
-                            # q sizes
-                            pbar.set_postfix(
-                                batch_q_size=batch_q.qsize(),
-                                prepped_q_size=prepped_q.qsize(),
-                                result_q_size=result_q.qsize(),
-                            )
+        # Removed legacy gpu_model_thread; inference runs on main thread now
 
         # Compute per-process CPU threads to avoid oversubscription
         num_pre = getattr(self, "num_preproc_workers", 2)
@@ -1549,23 +1284,171 @@ class MogFaceDetector:
             )
             for i in range(num_pre)
         ]
-        t_model = threading.Thread(target=gpu_model_thread, daemon=True)
-        t_agg = threading.Thread(target=aggregator_thread, daemon=True)
         t_reader.start()
         t_packer.start()
         for p in preparers:
             p.start()
-        t_model.start()
-        t_agg.start()
+
+        # Main-thread inference: consume prepared batches and run the model, store results
+        device = self.device
+        sentinels_seen = 0
+        with (
+            torch.no_grad(),
+            torch.autocast(
+                device_type=device.type,
+                dtype=self.amp_torch_dtype,
+                enabled=self.use_autocast,
+            ),
+        ):
+            while True:
+                try:
+                    item = prepped_q.get()
+                except (EOFError, OSError, FileNotFoundError):
+                    break
+                if item is None:
+                    sentinels_seen += 1
+                    if sentinels_seen == num_pre:
+                        break
+                    else:
+                        continue
+                batch, max_h, max_w, xt_cpu = item
+                if self.verbose:
+                    try:
+                        est_cost = int(xt_cpu.shape[0]) * int(max_h) * int(max_w)
+                        print(
+                            f"GPU batch: num={xt_cpu.shape[0]}, padded=({max_h}x{max_w}), pixels={est_cost:,} / budget={self.max_pixels_per_batch:,}"
+                        )
+                    except Exception:
+                        pass
+                # Move to device; pinning occurs in preparer
+                xt = xt_cpu.to(device, non_blocking=True)
+                if self.verbose and device.type == "cuda":
+                    torch.cuda.synchronize()
+                out_conf_b, out_loc_b = self.model(xt)
+                if self.verbose and device.type == "cuda":
+                    torch.cuda.synchronize()
+
+                anchors_dev = self._get_anchors_torch(max_h, max_w, device)
+                anchor_centers = anchors_dev[:, :2]
+                B = out_conf_b.shape[0]
+                for bi in range(B):
+                    v = batch[bi]
+                    if v.get("dummy", False):
+                        continue
+                    hi, wi = v["hi"], v["wi"]
+                    s = v["shrink"]
+                    valid_mask = (anchor_centers[:, 0] <= wi) & (
+                        anchor_centers[:, 1] <= hi
+                    )
+                    out_conf = out_conf_b[bi]
+                    out_loc = out_loc_b[bi]
+                    decode_bbox = decode_boxes(out_loc, anchors_dev)
+                    boxes = decode_bbox[valid_mask]
+                    scores = out_conf[valid_mask]
+                    scores_flat = (
+                        scores[:, 0]
+                        if (scores.dim() == 2 and scores.size(1) == 1)
+                        else scores.reshape(-1)
+                    )
+                    k = int(min(self.top_k, int(scores_flat.numel())))
+                    if k <= 0:
+                        c_dets = np.empty([0, 5], dtype=np.float32)
+                    else:
+                        topk_vals, topk_idx = torch.topk(scores_flat, k)
+                        boxes_sel = boxes[topk_idx]
+                        # scale back to original processed resolution (shrink factor)
+                        w = boxes_sel[:, 2] - boxes_sel[:, 0] + 1
+                        h = boxes_sel[:, 3] - boxes_sel[:, 1] + 1
+                        b0 = boxes_sel[:, 0] / s
+                        b1 = boxes_sel[:, 1] / s
+                        b2 = b0 + w / s - 1
+                        b3 = b1 + h / s - 1
+                        boxes_adj = torch.stack([b0, b1, b2, b3], dim=1)
+                        score_mask = topk_vals > float(self.score_th)
+                        if score_mask.any():
+                            boxes_adj = boxes_adj[score_mask]
+                            vals = topk_vals[score_mask]
+                            if _HAS_TV_NMS:
+                                try:
+                                    keep = tv_nms(boxes_adj, vals, float(self.nms_th))
+                                except Exception:
+                                    keep = None
+                            else:
+                                keep = None
+                            if keep is None:
+                                # fallback to CPU NMS
+                                b_np = boxes_adj.float().detach().cpu().numpy()
+                                v_np = (
+                                    vals.float().detach().cpu().numpy().reshape(-1, 1)
+                                )
+                                dets_np = np.hstack((b_np, v_np)).astype(
+                                    np.float32, copy=False
+                                )
+                                keep_idx = nms_numpy(dets_np, float(self.nms_th))
+                                dets_np = dets_np[keep_idx, :]
+                                if (
+                                    self.max_per_img > 0
+                                    and dets_np.shape[0] > self.max_per_img
+                                ):
+                                    image_scores = dets_np[:, -1]
+                                    image_thresh = np.sort(image_scores)[
+                                        -self.max_per_img
+                                    ]
+                                    keep2 = np.where(dets_np[:, -1] >= image_thresh)[0]
+                                    dets_np = dets_np[keep2, :]
+                                c_dets = dets_np
+                            else:
+                                if self.max_per_img > 0:
+                                    keep = keep[: int(self.max_per_img)]
+                                boxes_kept = (
+                                    boxes_adj[keep].float().detach().cpu().numpy()
+                                )
+                                scores_kept = (
+                                    vals[keep]
+                                    .float()
+                                    .detach()
+                                    .cpu()
+                                    .numpy()
+                                    .reshape(-1, 1)
+                                )
+                                c_dets = np.hstack((boxes_kept, scores_kept)).astype(
+                                    np.float32, copy=False
+                                )
+                        else:
+                            c_dets = np.empty([0, 5], dtype=np.float32)
+
+                    if v["flip"] and c_dets.size:
+                        det_t = np.zeros(c_dets.shape, dtype=np.float32)
+                        det_t[:, 0] = v["w0"] - c_dets[:, 2] - 1
+                        det_t[:, 1] = c_dets[:, 1]
+                        det_t[:, 2] = v["w0"] - c_dets[:, 0] - 1
+                        det_t[:, 3] = c_dets[:, 3]
+                        det_t[:, 4] = c_dets[:, 4]
+                        c_dets = det_t
+
+                    frame_idx = v["frame_idx"]
+                    key = v["key"]
+                    ratio = v.get("ratio", 1.0)
+                    if ratio != 1.0 and c_dets.size:
+                        scale = 1.0 / float(ratio)
+                        c_dets = c_dets.copy()
+                        c_dets[:, 0:4] *= scale
+                    with results_lock:
+                        fr = results.setdefault(frame_idx, {})
+                        fr[key] = c_dets
+                        if len(fr) == expected_counts.get(frame_idx, 0):
+                            with pbar_lock:
+                                pbar.update(1)
+                                pbar.set_postfix(
+                                    batch_q_size=batch_q.qsize(),
+                                    prepped_q_size=prepped_q.qsize(),
+                                )
 
         t_reader.join()
         frame_q.join()
         t_packer.join()
         for p in preparers:
             p.join()
-        t_model.join()
-        # All producers/consumers done
-        t_agg.join()
 
         # Assemble outputs in order
         if not results:

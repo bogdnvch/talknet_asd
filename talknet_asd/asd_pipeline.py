@@ -1,3 +1,4 @@
+import gc
 import shutil
 import sys
 import glob
@@ -346,10 +347,11 @@ class FaceProcessor:
                 max_source_image_size=self.args.face_detection_max_source_image_size
             )
             detections = detector_instance.detect_video(self.args.video_file_path)
-            detector_instance.to("cpu")
-            del detector_instance
-            torch.cuda.empty_cache()
+            print("Deleting model")
+            detector_instance.delete_model()
+            print("Model deleted")
         except Exception as e:
+            raise e
             sys.stderr.write(
                 f"Error: Could not detect faces using MogFaceDetector: {e}\\r\\n"
             )
@@ -710,9 +712,7 @@ class ActiveSpeakerDetector:
         all_scores = []
         duration_set = {1, 1, 1, 2, 2, 2, 3, 3, 4, 5, 6}
 
-        for file_idx, file in tqdm.tqdm(
-            enumerate(files), total=len(files), desc="Evaluating ASD"
-        ):
+        for file in tqdm.tqdm(files, total=len(files), desc="Evaluating ASD"):
             file_name = os.path.splitext(os.path.basename(file))[0]
 
             _, audio_samples_raw_data = wavfile.read(
@@ -959,6 +959,7 @@ class ActiveSpeakerDetector:
         print(time.strftime("%Y-%m-%d %H:%M:%S") + " Scores extracted")
         model.to("cpu")
         del model
+        gc.collect()
         torch.cuda.empty_cache()
         return all_scores
 
@@ -983,7 +984,7 @@ class Pipeline:
         dtype: Literal["float32", "float16"] = "float16",
         visualize: bool = False,
         face_detection_threshold: float = 0.4,
-        face_detection_max_source_image_size: int = 1920,
+        face_detection_max_source_image_size: int = 1280,
         **kwargs,
     ):
         self.device = resolve_device(device=device)

@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
 
-import sys, time
+import sys
+import time
 
-from talknet_asd.loss import lossAV, lossA, lossV
+from talknet_asd.loss import lossAV
 from talknet_asd.model.talkNetModel import talkNetModel
 
 
