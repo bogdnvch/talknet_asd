@@ -346,6 +346,7 @@ class FaceProcessor:
                 max_source_image_size=self.args.face_detection_max_source_image_size
             )
             detections = detector_instance.detect_video(self.args.video_file_path)
+            detector_instance.to("cpu")
             del detector_instance
             torch.cuda.empty_cache()
         except Exception as e:
@@ -956,6 +957,9 @@ class ActiveSpeakerDetector:
             all_scores.append(final_scores_this_file)
 
         print(time.strftime("%Y-%m-%d %H:%M:%S") + " Scores extracted")
+        model.to("cpu")
+        del model
+        torch.cuda.empty_cache()
         return all_scores
 
     def save_results(self, scores):

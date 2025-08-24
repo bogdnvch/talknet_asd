@@ -409,7 +409,7 @@ class MogFaceDetector:
         test_hard: int = 0,
         repo_id: str = "AlekseyKorshuk/MogFace",
         weights_filename: str = "model_140000.pth",
-        verbose: bool = True,
+        verbose: bool = False,
     ):
         self.device = (
             device
@@ -487,7 +487,6 @@ class MogFaceDetector:
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to(self.device)
         self.model.eval()
-        self.model.compile(mode="reduce-overhead", fullgraph=True)
         if self.use_autocast:
             print(f"Autocast enabled with precision: {precision}")
 
@@ -495,6 +494,16 @@ class MogFaceDetector:
         self._anchor_cache = {}  # (H,W) -> np anchors_cxcywh
         self._anchor_torch_cpu = {}  # (H,W) -> torch.FloatTensor (CPU)
         self._anchor_torch_device = {}  # (H,W,device,idx) -> torch.FloatTensor (on device)
+        # Thread-local storage for compiled model to ensure compile & run happen in the same thread
+        self._tls = threading.local()
+
+    def _get_compiled_model_for_current_thread(self):
+        compiled = getattr(self._tls, "compiled_model", None)
+        if compiled is None:
+            # Compile within the current thread to keep CUDA Graph TLS consistent
+            compiled = torch.compile(self.model, mode="reduce-overhead", fullgraph=True)
+            self._tls.compiled_model = compiled
+        return compiled
 
     def _round_up_to_multiple(self, value, multiple):
         if multiple is None or multiple <= 1:
@@ -783,7 +792,8 @@ class MogFaceDetector:
                     enabled=self.use_autocast,
                 ),
             ):
-                out_conf_b, out_loc_b = self.model(xt)
+                compiled_model = self._get_compiled_model_for_current_thread()
+                out_conf_b, out_loc_b = compiled_model(xt)
             out_conf_b = out_conf_b.float()
             out_loc_b = out_loc_b.float()
 
@@ -1348,7 +1358,8 @@ class MogFaceDetector:
                     if self.verbose and device.type == "cuda":
                         torch.cuda.synchronize()
                     t1 = time.time()
-                    out_conf_b, out_loc_b = self.model(xt)
+                    compiled_model = self._get_compiled_model_for_current_thread()
+                    out_conf_b, out_loc_b = compiled_model(xt)
                     if self.verbose and device.type == "cuda":
                         torch.cuda.synchronize()
                     t2 = time.time()
