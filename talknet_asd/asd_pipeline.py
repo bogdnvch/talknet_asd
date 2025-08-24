@@ -342,7 +342,9 @@ class FaceProcessor:
             return False, []
 
         try:
-            detector_instance = MogFaceDetector()
+            detector_instance = MogFaceDetector(
+                max_source_image_size=self.args.face_detection_max_source_image_size
+            )
             detections = detector_instance.detect_video(self.args.video_file_path)
             del detector_instance
             torch.cuda.empty_cache()
@@ -977,6 +979,7 @@ class Pipeline:
         dtype: Literal["float32", "float16"] = "float16",
         visualize: bool = False,
         face_detection_threshold: float = 0.4,
+        face_detection_max_source_image_size: int = 1920,
         **kwargs,
     ):
         self.device = resolve_device(device=device)
@@ -1004,6 +1007,7 @@ class Pipeline:
         self.crop_scale = crop_scale
         self.visualize = visualize
         self.face_detection_threshold = face_detection_threshold
+        self.face_detection_max_source_image_size = face_detection_max_source_image_size
 
         self.pyavi_path = None
         self.pywork_path = None

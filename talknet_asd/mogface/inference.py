@@ -385,7 +385,7 @@ class MogFaceDetector:
         self,
         device: torch.device = None,
         precision: str = "bf16",
-        max_source_image_size: int = 2560,
+        max_source_image_size: int = 1920,
         max_pixels_per_batch: int = 60_000_000,
         max_frame_queue_size: int = 32,
         max_batch_queue_size: int = 128,
