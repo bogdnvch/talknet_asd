@@ -236,6 +236,7 @@ def _batch_preparer_worker(proc_idx, cfg, batch_q, prepped_q):
     pad_to_multiple = cfg.get("pad_to_multiple", None)
     use_autocast = bool(cfg.get("use_autocast", False))
     amp_dtype_str = cfg.get("amp_dtype", None)
+    pin_memory = bool(cfg.get("pin_memory", False))
     if amp_dtype_str == "fp16":
         amp_dtype = _torch.float16
     elif amp_dtype_str == "bf16":
@@ -268,7 +269,7 @@ def _batch_preparer_worker(proc_idx, cfg, batch_q, prepped_q):
             else _torch.float32
         )
         xt_cpu = _torch.empty(
-            (B, 3, int(max_h), int(max_w)), dtype=dtype, pin_memory=True
+            (B, 3, int(max_h), int(max_w)), dtype=dtype, pin_memory=pin_memory
         )
         for bi, v in enumerate(batch):
             if v.get("dummy", False):
@@ -1270,6 +1271,8 @@ class MogFaceDetector:
             "pad_to_multiple": self.pad_to_multiple,
             "use_autocast": self.use_autocast,
             "amp_dtype": amp_dtype_str,
+            # Pin memory only if the model runs on CUDA; CPU pinning on CPU-only envs can trigger CUDA init
+            "pin_memory": bool(self.device.type == "cuda"),
         }
         # post_cfg removed as postprocess workers are no longer used
 
