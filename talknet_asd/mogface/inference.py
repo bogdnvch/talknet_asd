@@ -223,26 +223,13 @@ def _compute_num_threads(total_procs):
 def _batch_preparer_worker(proc_idx, cfg, batch_q, prepped_q):
     """
     CPU worker (thread-safe): receives (batch, max_h, max_w) with per-variant dicts,
-    builds a pinned, padded tensor batch and sends (batch, max_h, max_w, xt_cpu) to the GPU stage.
-    Uses only CPU and OpenCV.
+    builds a padded NumPy batch and sends (batch, max_h, max_w, xt_np) to the GPU stage.
+    Uses only CPU and OpenCV. No Torch tensors here.
     """
     import numpy as _np  # local import for fork-safety
     import cv2 as _cv2
-    import torch as _torch
-
-    # Avoid CPU oversubscription
-    _torch.set_num_threads(int(cfg.get("num_threads", 1)))
 
     pad_to_multiple = cfg.get("pad_to_multiple", None)
-    use_autocast = bool(cfg.get("use_autocast", False))
-    amp_dtype_str = cfg.get("amp_dtype", None)
-    pin_memory = bool(cfg.get("pin_memory", False))
-    if amp_dtype_str == "fp16":
-        amp_dtype = _torch.float16
-    elif amp_dtype_str == "bf16":
-        amp_dtype = _torch.bfloat16
-    else:
-        amp_dtype = None
 
     while True:
         try:
@@ -263,14 +250,8 @@ def _batch_preparer_worker(proc_idx, cfg, batch_q, prepped_q):
             max_w = ((int(max_w) + m - 1) // m) * m
 
         B = len(batch)
-        dtype = (
-            amp_dtype
-            if (use_autocast and amp_dtype in (_torch.float16, _torch.bfloat16))
-            else _torch.float32
-        )
-        xt_cpu = _torch.empty(
-            (B, 3, int(max_h), int(max_w)), dtype=dtype, pin_memory=pin_memory
-        )
+        # Always prepare as float32 NumPy (autocast will handle dtype on device)
+        xt_np = _np.zeros((B, int(max_h), int(max_w), 3), dtype=_np.float32)
         for bi, v in enumerate(batch):
             if v.get("dummy", False):
                 # leave as zeros; already allocated
@@ -288,14 +269,10 @@ def _batch_preparer_worker(proc_idx, cfg, batch_q, prepped_q):
                     fy=s,
                     interpolation=_cv2.INTER_LINEAR,
                 )
-            pad = _np.zeros((max_h, max_w, 3), dtype=img_in.dtype)
+            pad = xt_np[bi]
             pad[: img_in.shape[0], : img_in.shape[1], :] = img_in
-            x = _torch.from_numpy(pad).permute(2, 0, 1).float()
-            if dtype in (_torch.float16, _torch.bfloat16):
-                x = x.to(dtype=dtype)
-            xt_cpu[bi, :, :, :] = x
         try:
-            prepped_q.put((batch, max_h, max_w, xt_cpu))
+            prepped_q.put((batch, max_h, max_w, xt_np))
         except (EOFError, OSError):
             break
 
@@ -1271,8 +1248,6 @@ class MogFaceDetector:
             "pad_to_multiple": self.pad_to_multiple,
             "use_autocast": self.use_autocast,
             "amp_dtype": amp_dtype_str,
-            # Pin memory only if the model runs on CUDA; CPU pinning on CPU-only envs can trigger CUDA init
-            "pin_memory": bool(self.device.type == "cuda"),
         }
         # post_cfg removed as postprocess workers are no longer used
 
@@ -1314,17 +1289,18 @@ class MogFaceDetector:
                         break
                     else:
                         continue
-                batch, max_h, max_w, xt_cpu = item
+                batch, max_h, max_w, xt_np = item
                 if self.verbose:
                     try:
-                        est_cost = int(xt_cpu.shape[0]) * int(max_h) * int(max_w)
+                        est_cost = int(xt_np.shape[0]) * int(max_h) * int(max_w)
                         print(
-                            f"GPU batch: num={xt_cpu.shape[0]}, padded=({max_h}x{max_w}), pixels={est_cost:,} / budget={self.max_pixels_per_batch:,}"
+                            f"GPU batch: num={xt_np.shape[0]}, padded=({max_h}x{max_w}), pixels={est_cost:,} / budget={self.max_pixels_per_batch:,}"
                         )
                     except Exception:
                         pass
-                # Move to device; pinning occurs in preparer
-                xt = xt_cpu.to(device, non_blocking=True)
+                # Convert NumPy NHWC to Torch NCHW and move to device
+                xt = torch.from_numpy(xt_np).permute(0, 3, 1, 2).contiguous()
+                xt = xt.to(device, non_blocking=(device.type == "cuda"))
                 if self.verbose and device.type == "cuda":
                     torch.cuda.synchronize()
                 out_conf_b, out_loc_b = self.model(xt)
